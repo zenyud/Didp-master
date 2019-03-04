@@ -1,0 +1,135 @@
+#!/usr/bin/python
+# coding:utf-8
+# encoding: utf-8
+#
+# DO NOT EDIT UNLESS YOU ARE SURE THAT YOU KNOW WHAT YOU ARE DOING
+#
+#  options string: py
+#
+
+import sys
+import uuid
+import pprint
+import glob
+import time
+import threading
+
+
+import urllib 
+import urllib2
+
+import commands
+
+from time import sleep
+              
+_envPath=sys.path[0]+'/_env'
+port=commands.getoutput("source "+ _envPath+";echo $REST_PORT")
+logLines=0
+endFlag=False
+#需要配置rest服务地址
+preUrl = 'http://localhost:'+port+'/sharkata/'
+jobReturn=False
+
+def printUsage():
+     print ' '
+     print '  用法: PROJECTNAME JOBNAME INSTANCEID [JOBPARAS]...'
+     print '  PROJECTNAME '
+     print '  工程名称：sharkata'
+     print '  JOBNAME'
+     print '  作业名称 archive:归档/修数 ;spacecount:归档数据统计; order:数据提数服务'
+     print '  INSTANCEID'
+     print '  作业实例ID 默认 0'
+     print '  SERVICEPARAS'
+     print '  HDS批处理服务业务参数。批处理服务运行时需要的业务参数，可包含0-N个业务参数。 '
+     print '  archive参数 SYSNAME@系统名称 TABLENAME@表名称  DATE@数据日期（修数日期） ORG@机构号（999） '
+     print '  order参数 USERNAME@执行的用户名  ORDERID@订单id(后台数据库查找) DATE@提数日期 '
+     print '  spacecount参数 为空 '
+     print ' '
+    
+def jobRun(projectName,jobName,instanceID,jobParas):
+    global endFlag
+    global preUrl
+    global jobReturn
+    url=preUrl+'jobRun/'
+    values = {"projectName":projectName,"jobName":jobName,"instanceID":instanceID,"jobParas":jobParas}
+    params = str(values)
+    params=params.replace('\'','"')
+    print "jobRun params: " ,params
+    func_name = sys._getframe().f_code.co_name
+    headers = {"Content-type":"application/json","Accept": "application/json"}
+    try:
+      req = urllib2.Request(url, params, headers)
+      response = urllib2.urlopen(req)
+      jobReturn=response.read()
+    except Exception, tx:
+    	print "执行错误"
+    endFlag=True
+
+def getLog(log_date,instanceId):
+    global endFlag
+    global preUrl
+    logLines=0
+    url=preUrl+'getLog/'+log_date+'/'+instanceId+'/'
+    print url
+    print 'logs--------------------'
+    print ' '
+    while True: 
+       req = urllib2.Request(url+str(logLines))
+       response = urllib2.urlopen(req)
+       result=response.read()
+       if len(result) >1:
+          print result
+       logLines=logLines+result.count("\n")
+       if endFlag: 
+       	  req = urllib2.Request(url+str(logLines))
+          response = urllib2.urlopen(req)
+          result=response.read() 
+          print result
+          break  
+       sleep(3)
+     
+
+print "start---------------------------"
+
+print 'arg >>>>>>>>', sys.argv
+
+if len(sys.argv)<2:
+	 printUsage()
+	 sys.exit(1)
+	 
+#arg deal
+#fourth arg
+arg=''
+#处理后面@参数
+for i in range(4,len(sys.argv)):
+  arg=arg+sys.argv[i]+',' 
+#去掉最后一个逗号
+arg=arg[:-1]	
+print 'arg result >>>>>>>>:',arg
+#生成instanceId
+instanceId=''
+uuID = str(uuid.uuid1()).replace('-','')
+#if sys.argv[3]=='0':
+#	instanceId=sys.argv[2]+'_'+uuID
+#else:
+instanceId=sys.argv[2]+'_'+sys.argv[3]+'_'+uuID
+print 'instanceId >>>>>>>>:',instanceId
+#获取当前时间
+log_date = time.strftime('%Y%m%d',time.localtime(time.time()))
+#作业执行线程
+tjobrun=threading.Thread(target=jobRun,name='jobrun_thread',args=(sys.argv[1],sys.argv[2],instanceId,arg))
+
+#日志获取线程
+tgetLog=threading.Thread(target=getLog,name='getLog_thread',args=(log_date,instanceId))
+
+tjobrun.start()
+tgetLog.start()
+
+tjobrun.join()
+tgetLog.join()
+
+print "python处理结束,jobrun return:",jobReturn
+if jobReturn:
+ sys.exit(0)
+else:
+ sys.exit(1)
