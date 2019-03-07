@@ -354,6 +354,7 @@ class HiveUtil(object):
         result = self.get_table_desc(db_name, table_name)
         add_cols = set()
         partition_cols = set()
+        # 过滤掉过滤字段
         if filter:
             for add_col in AddColumn:
                 v = common_dict.get(add_col.value)
@@ -365,11 +366,15 @@ class HiveUtil(object):
                     partition_cols.add(x.upper().strip())
         i = 0
         hive_meta_info_list = list()  # 字段信息列表
+        # 删除字段
+        delete_cols = ["DELETE_FLG", "DELETE_DT"]
         # 迭代字段
         for x in result:
             if x[0].upper().strip() in add_cols:
                 continue
             if x[0].upper().strip() in partition_cols:
+                continue
+            if x[0].upper().strip() in delete_cols:
                 continue
             if x[0].__contains__("#") or StringUtil.is_blank(x[0]):
                 continue

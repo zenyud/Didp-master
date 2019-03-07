@@ -442,7 +442,7 @@ class MonRunLogDao(object):
             DidpMonRunLog.PROCESS_TYPE == pros_type,
             DidpMonRunLog.BIZ_DATE >= start_date,
             DidpMonRunLog.BIZ_DATE <= end_date,
-            DidpMonRunLog.PROCESS_STATUS == "1"  # 执行状态为成功
+            DidpMonRunLog.PROCESS_STATUS == "0"  # 执行状态为成功
 
         ).all()
         if len(result) < 1:
@@ -471,7 +471,7 @@ class MonRunLogDao(object):
             DidpMonRunLog.PROCESS_TYPE == pros_type,
             DidpMonRunLog.BIZ_DATE >= start_date,
             DidpMonRunLog.BIZ_DATE <= end_date,
-            DidpMonRunLog.PROCESS_STATUS == "1"  # 执行状态为成功
+            DidpMonRunLog.PROCESS_STATUS == "0"  # 执行状态为成功
         ).all()
         if len(result) < 1:
             return None
@@ -498,7 +498,7 @@ class MonRunLogDao(object):
             DidpMonRunLog.PROCESS_TYPE == pros_type,
             DidpMonRunLog.BIZ_DATE >= start_date,
             DidpMonRunLog.BIZ_DATE <= end_date,
-            DidpMonRunLog.PROCESS_STATUS == "1"  # 执行状态为成功
+            DidpMonRunLog.PROCESS_STATUS == "0"  # 执行状态为成功
         ).all()
         if len(result) < 1:
             return None
@@ -518,7 +518,7 @@ class MonRunLogDao(object):
             DidpMonRunLog.SYSTEM_KEY == system,
             DidpMonRunLog.TABLE_NAME == table_name,
             DidpMonRunLog.BRANCH_NO == org,
-            DidpMonRunLog.PROCESS_STATUS == '1',
+            DidpMonRunLog.PROCESS_STATUS == '0',
             DidpMonRunLog.EXTENDED1 == str(SaveMode.ALL.value),
             DidpMonRunLog.BIZ_DATE <= biz_date
         ).order_by(DidpMonRunLog.BIZ_DATE.desc()).all()

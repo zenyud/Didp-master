@@ -52,9 +52,11 @@ class ArchiveData(object):
     archive_count = 0  # 归档数据条数
     pro_start_date = None  # 流程开始时间
     pro_end_date = None  # 流程结束时间
-    __PRO_STATUS = "1"  # 加工状态
+    __PRO_STATUS = "0"  # 加工状态
     error_msg = ""  # 错误信息
     is_already_load = False  # 是否已经归档完成
+    _DELETE_FLG = "DELETE_FLG"  # 删除标记字段名 0 ：未删除 1 :已删除
+    _DELETE_DT = "DELETE_DT"  # 删除日期字段名
 
     def __init__(self):
 
@@ -98,6 +100,8 @@ class ArchiveData(object):
         self.buckets_num = self.__args.buckNum  # 分桶数
         self.cluster_col = self.__args.cluCol  # 分桶键
         self.source_data_mode = int(self.__args.sMode)  # 数据源模式
+        if self.source_data_mode == 0:
+            self.source_data_mode = 1  # 初始化改全量
         self.system = self.__args.system  # 系统
         self.batch = self.__args.batch  # 批次号
         self.obj = self.__args.obj  # 对象名
@@ -322,9 +326,9 @@ class ArchiveData(object):
                                       self.table_name):
             if (StringUtil.eq_ignore(self.data_range,
                                      DatePartitionRange.ALL_IN_ONE.value)
-                and self.hive_util.has_partition(self.common_dict,
-                                                 self.db_name,
-                                                 self.table_name)):
+                    and self.hive_util.has_partition(self.common_dict,
+                                                     self.db_name,
+                                                     self.table_name)):
                 raise BizException("归档日期分区与Hive表不一致 ！！！")
 
         def set_value(x, y, z):
@@ -536,6 +540,7 @@ class ArchiveData(object):
         """
         hive_field_name_list = [field.col_name.upper() for field in
                                 hive_field_infos]
+
         meta_field_name_list = [x.col_name.upper() for x in
                                 meta_field_infos]
         LOG.debug("Hive字段个数为：%s" % len(hive_field_name_list))
@@ -636,8 +641,8 @@ class ArchiveData(object):
 
                         if (meta_type_hive.field_length <
                                 meta_type_ddl.field_length and
-                                    meta_type_hive.field_scale <
-                                    meta_type_ddl.field_scale):
+                                meta_type_hive.field_scale <
+                                meta_type_ddl.field_scale):
                             LOG.debug(
                                 "字段{col_name}精度扩大 {hive_type} -->> {ddl_type} \n"
                                 "修改表字段精度为 {ddl_type} ".format(
@@ -648,7 +653,7 @@ class ArchiveData(object):
                             continue
 
                         elif (
-                                        meta_type_hive.field_length >= meta_type_ddl.field_length
+                                meta_type_hive.field_length >= meta_type_ddl.field_length
                                 and meta_type_hive.field_scale < meta_type_ddl.field_scale):
 
                             old_type = meta_type_ddl.get_whole_type
@@ -663,7 +668,7 @@ class ArchiveData(object):
                                 ))
                             continue
                         elif (
-                                        meta_type_hive.field_length < meta_type_ddl.field_length
+                                meta_type_hive.field_length < meta_type_ddl.field_length
                                 and meta_type_hive.field_scale > meta_type_ddl.field_scale):
                             old_type = meta_type_ddl.get_whole_type
                             meta_type_ddl.field_scale = meta_type_hive.field_scale
@@ -772,6 +777,9 @@ class ArchiveData(object):
                     sql = sql + "comment '{comment_content}'".format(
                         comment_content=field.comment)
                 sql = sql + ","
+        # 添加删除标志和删除日期字段
+        sql = sql + "{DELETE_FLG} VARCHAR(1),{DELETE_DT} VARCHAR(8) ,".format(DELETE_FLG=self._DELETE_FLG,
+                                                                              DELETE_DT=self._DELETE_DT)
         return sql[:-1]
 
     def create_where_sql(self, table_alias, data_date, data_partition_range,
@@ -875,6 +883,12 @@ class ArchiveData(object):
                                                         field.data_type,
                                                         need_trim)
 
+        # 添加删除标识, 删除日期
+        sql = sql + " ,'0' {DELETE_FLG} ,null {DELETE_DT}".format(
+            DELETE_FLG=self._DELETE_FLG,
+            DELETE_DT=self._DELETE_DT
+        )
+
         return sql
 
     def build_load_column_with_compare(self, compare_meta, base_meta,
@@ -900,13 +914,13 @@ class ArchiveData(object):
             # 如果有字段变化
             for field in field_change_list:
                 if (field.col_name.upper() in base_col_names and
-                            field.col_name.upper() in compare_col_names):
+                        field.col_name.upper() in compare_col_names):
                     sql = sql + self.build_column(None, field.col_name,
                                                   field.hive_type.field_type,
                                                   False) + ","
 
                 elif (field.col_name.upper() in base_col_names and
-                              field.col_name.upper() not in compare_col_names):
+                      field.col_name.upper() not in compare_col_names):
                     sql = sql + " '' as {0} ,".format(
                         field.col_name.upper())  # 加上空串
 
@@ -917,7 +931,8 @@ class ArchiveData(object):
                                               field.col_name,
                                               field.data_type,
                                               need_trim) + ","
-
+        # 加上删除标识和删除时间
+        sql = sql + " '0' delete_flg,null delete_dt ,"
         return sql[:-1]
 
     @staticmethod
@@ -1111,7 +1126,7 @@ class ArchiveData(object):
         except Exception as e:
             traceback.print_exc()
             self.error_msg = str(e.message)
-            self.__PRO_STATUS = "0"
+            self.__PRO_STATUS = "1"
             LOG.error("归档失败")
         finally:
 
@@ -1129,7 +1144,7 @@ class ArchiveData(object):
             if self.session:
                 self.session.close()  # 关闭连接
             self.hive_util.close()
-            if self.__PRO_STATUS == "1":
+            if self.__PRO_STATUS == "0":
                 LOG.info("归档成功")
                 return 0
             else:
@@ -1160,7 +1175,6 @@ class LastAddArchive(ArchiveData):
 
     def clean(self):
         super(LastAddArchive, self).clean()
-
 
     def init_ext(self):
         if int(self.source_data_mode) != SourceDataMode.ADD.value:
@@ -1477,7 +1491,6 @@ class AddArchive(ArchiveData):
     def clean(self):
         super(AddArchive, self).clean()
 
-
     def init_ext(self):
         # 判断SourceDataMode
         if self.source_data_mode == SourceDataMode.ALL.value:
@@ -1556,7 +1569,6 @@ class AddArchive(ArchiveData):
         LOG.info("执行SQL: {0}".format(hql))
         self.hive_util.execute(hql)
 
-
     def load_data(self):
         LOG.debug("先根据数据日期删除表中数据")
         hql = ("DELETE FROM  {DB_NAME}.{TABLE_NAME} {PARTITION_SQL} \n"
@@ -1613,8 +1625,13 @@ class AddArchive(ArchiveData):
         :return:
         """
         LOG.debug("------------执行全求增转换入库----------")
-        meta_info = self.meta_data_service.get_meta_field_info_list(
-            self.schema_id, self.table_name)
+        # 增量表字段信息
+        meta_info = self.hive_util.get_hive_meta_field(
+            self.common_dict,
+            self.db_name,
+            self.table_name,
+            True)
+
         all_table_fields_infos = None
 
         if self.all_table:
@@ -1862,7 +1879,7 @@ class AddArchive(ArchiveData):
         for field in self.source_ddl:
             if field.col_name.upper() not in pk_list:
                 where_sql = where_sql + (" hds_section_yes.{col_name} != "
-                                         " hds_temp_table.{col_name} OR".
+                                         " hds_temp_table.{col_name} OR ".
                                          format(col_name=field.col_name_quote))
         if len(where_sql) > 0:
             sql = sql + " {WHERE_SQL} ".format(WHERE_SQL=where_sql)
@@ -1897,7 +1914,6 @@ class AllArchive(ArchiveData):
         super(AllArchive, self).clean()
         if self.is_drop_tmp_table:
             self.drop_table(self.temp_db, self.app_table_name1)
-
 
     def init_ext(self):
         source_data_mode = int(self.source_data_mode)
@@ -1950,10 +1966,11 @@ class AllArchive(ArchiveData):
             if not StringUtil.is_blank(field.comment):
                 hql = hql + " comment '{comment}' ".format(
                     comment=field.comment)
+        # 添加删除标记和删除日期
+        hql = hql + ", {DELETE_FLG} VARCHAR(1),{DELETE_DT} VARCHAR(8) ".format(DELETE_FLG=self._DELETE_FLG,
+                                                                               DELETE_DT=self._DELETE_DT)
         hql = hql + " )"
         tmp_sql = ""
-        LOG.debug("是否相等 {0}".format(StringUtil.eq_ignore(self.data_range,
-                                                         DatePartitionRange.ALL_IN_ONE.value)))
         if not StringUtil.eq_ignore(self.data_range,
                                     DatePartitionRange.ALL_IN_ONE.value):
             tmp_sql = "{col_data_scope} string,".format(
@@ -2000,6 +2017,7 @@ class AllArchive(ArchiveData):
                                   SourceDataMode.ADD.value):
             # 增求全转换入库
             self.load_data2()
+        # self.update_delete_flg() # 更新删除状态
 
     def load_data1(self):
         """
@@ -2035,8 +2053,13 @@ class AllArchive(ArchiveData):
         :return:
         """
         LOG.info("开始增量求全量转换入库》》》")
-        meta_info = self.meta_data_service.get_meta_field_info_list(
-            self.schema_id, self.table_name)
+
+        # 全量表字段信息
+        meta_info = self.hive_util.get_hive_meta_field(self.common_dict,
+                                                       self.db_name,
+                                                       self.table_name,
+                                                       True)
+
         add_table_field_infos = None
         if self.table_add:
             add_table_field_infos = self.hive_util.get_hive_meta_field(
@@ -2046,11 +2069,7 @@ class AllArchive(ArchiveData):
                 True)  # 增量表字段信息
 
         # 全量表字段信息
-        hive_field_infos = self.hive_util.get_hive_meta_field(self.common_dict,
-                                                              self.db_name,
-                                                              self.table_name,
-                                                              True
-                                                              )
+        hive_field_infos = meta_info
         pk_list = self.pk_list
         if pk_list:
             pk_list = pk_list.split("|")
@@ -2255,6 +2274,54 @@ class AllArchive(ArchiveData):
         LOG.info("执行SQL:{0} ".format(hql))
         self.hive_util.execute(hql)
 
+    # def update_delete_flg(self):
+    #     """
+    #         更新减量数据的标记
+    #     :return:
+    #     """
+    #     # 更新减量数据,将减量数据的删除标志改为1
+    #     yes_day = DateUtil.get_day_of_day(self.data_date, -1)  # 前一天
+    #     lastest_all_archive = (self.mon_run_log_service.
+    #                            find_latest_all_archive(self.system,
+    #                                                    self.table_name,
+    #                                                    self.org, yes_day))
+    #
+    #     pk_list = None
+    #     if isinstance(self.pk_list, str):
+    #         pk_list = self.pk_list.split("|")
+    #     elif isinstance(self.pk_list, list):
+    #         pk_list = pk_list
+    #     i = 0
+    #     sql = ""
+    #     for pk in pk_list:
+    #         if i == 0:
+    #             sql = " {pk} not in (select {pk} from {db_name}.{table_name} where {date_col}='{data_date}') ". \
+    #                 format(pk=pk,
+    #                        db_name=self.db_name,
+    #                        table_name=self.table_name,
+    #                        date_col=self.col_date,
+    #                        data_date=self.data_date
+    #                        )
+    #         else:
+    #             sql = sql + " and {pk} not in (select {pk} from {db_name}.{table_name} where {date_col}='{data_date}') "
+    #         i = i + 1
+    #     if lastest_all_archive:
+    #         #  如果之前有全量归档则更新最近一起全量数据的删除标记，删除日期
+    #         last_archive_date = lastest_all_archive.BIZ_DATE
+    #         hql = "UPDATE  {db_name}.{table_name} {partition_sql} set ({DELETE_FLG}= '1',{DELETE_DT}='{DATA_DATE}') " \
+    #               "where  {date_col} = '{yes_date}' and  {not_in_sql} ".format(db_name=self.db_name,
+    #                                                                            table_name=self.table_name,
+    #                                                                            partition_sql=self.create_partition_sql(
+    #                                                                                self.data_range, "0", "0"),
+    #                                                                            DELETE_FLG=self._DELETE_FLG,
+    #                                                                            DELETE_DT=self._DELETE_DT,
+    #                                                                            DATA_DATE=self.data_date,
+    #                                                                            date_col=self.col_date,
+    #                                                                            yes_date=last_archive_date,
+    #                                                                            not_in_sql=sql)
+    #         LOG.info("执行SQL{0}".format(hql))
+    #         self.hive_util.execute(hql)
+
 
 class ChainTransArchive(ArchiveData):
     """
@@ -2353,9 +2420,10 @@ class ChainTransArchive(ArchiveData):
             self.columns = self.not_compare_column.split(",")
 
     def count_archive_data(self):
-        hql = "SELECT COUNT(1) FROM {db_name}.{table_name} ".format(
-            db_name=self.source_db,
-            table_name=self.source_table)
+        hql = "SELECT COUNT(1) FROM {source_db}.{table_name} where {fil_sql}".format(
+            source_db=self.source_db,
+            table_name=self.source_table,
+            fil_sql=self.filter_sql)
         r = self.hive_util.execute_sql(hql)
         count = int(r[0][0])
         LOG.info("入库条数为：{0}".format(count))
@@ -2538,23 +2606,23 @@ class ChainTransArchive(ArchiveData):
                  "  ON  ({on_key}) \n"
                  "  WHERE  CONCAT_WS('|',{col1}) != CONCAT_WS('|',{col2}) "
                .format(
-            source_db=self.source_db,
-            source_table_name=self.source_table,
-            db_name=self.db_name,
-            table_name=self.table_name,
-            where_sql=self.create_where_sql(None,
-                                            None,
-                                            self.data_range,
-                                            self.date_scope,
-                                            self.org_pos,
-                                            self.org,
-                                            None),
-            chain_edate=self.__chain_edate,
-            chain_open_date=self.CHAIN_OPEN_DATE,
-            on_key=self.build_key_sql_on("A", "B", self.pk_list),
-            col1=self.build_sql_column_with_not_compare("A"),
-            col2=self.build_sql_column_with_not_compare("B")
-        ))
+                    source_db=self.source_db,
+                    source_table_name=self.source_table,
+                    db_name=self.db_name,
+                    table_name=self.table_name,
+                    where_sql=self.create_where_sql(None,
+                                                    None,
+                                                    self.data_range,
+                                                    self.date_scope,
+                                                    self.org_pos,
+                                                    self.org,
+                                                    None),
+                    chain_edate=self.__chain_edate,
+                    chain_open_date=self.CHAIN_OPEN_DATE,
+                    on_key=self.build_key_sql_on("A", "B", self.pk_list),
+                    col1=self.build_sql_column_with_not_compare("A"),
+                    col2=self.build_sql_column_with_not_compare("B")
+                ))
 
         LOG.info("执行SQL :{0}".format(hql))
         self.hive_util.execute(hql)
@@ -2566,7 +2634,7 @@ class ChainTransArchive(ArchiveData):
                "  WHERE {where_sql} \n"
                "  AND EXISTS \n"
                "  (SELECT * FROM {temp_db}.{app_table} AS B \n"
-               "   WHERE {key_list} AND {chain_edate} ='{data_date}' ) \n" 
+               "   WHERE {key_list} AND {chain_edate} ='{data_date}' ) \n"
                "   AND {chain_edate} = '{chain_open_date}' "
                .format(db_name=self.db_name,
                        table_name=self.table_name,
@@ -2622,7 +2690,6 @@ class ChainTransArchive(ArchiveData):
         LOG.debug("----------------拉链表归档--------------")
 
         # 更新当天的闭链区和删除当天的开链区的数据都是为了避免数据重复
-        # 都是为了当日重做数据
         LOG.debug("更新当天闭链区的数据为99991231")
         #  把业务日期当日的数据设置为有效数据
         hql = ("UPDATE {db_name}.{table_name} {partition_sql} \n"

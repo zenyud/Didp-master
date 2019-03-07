@@ -33,7 +33,8 @@ class BatchArchiveInit(object):
     """
         批量初始化
     """
-
+    _DELETE_FLG="DELETE_FLG"
+    _DELETE_DT="DELETE_DT"
     def __init__(self):
 
         self.__args = self.archive_init()  # 参数初始化
@@ -75,8 +76,9 @@ class BatchArchiveInit(object):
             PartitionKey.DATE_SCOPE.value)  # 分区字段名
         self.date_col = self.__args.dateCol  # 日期字段
         self.date_format = self.__args.dateFm  # 日期字段格式
-        self.ignore_err_line = True if int(
-            self.__args.igErr) == 1 else False  # 是否忽略错误行
+        if self.__args.igErr is None :
+            self.__args.igErr = 0
+        self.ignore_err_line = True if int(self.__args.igErr) == 1 else False  # 是否忽略错误行
 
         # 当日日期
         # %Y-%m-%d %H:%M:%S
@@ -84,7 +86,7 @@ class BatchArchiveInit(object):
 
         self.obj = self.__args.obj  # 数据对象名
         self.org = self.__args.org  # 机构字段名
-        self.pro_status = 1  # 处理状态
+        self.pro_status = 0  # 处理状态默认为成功
         self.error_msg = None  # 错误信息
         self.system = self.__args.system
         self.source_count = 0
@@ -226,7 +228,7 @@ class BatchArchiveInit(object):
         except Exception as e:
             traceback.print_exc()
             self.error_msg = str(e.message)
-            self.pro_status = 0
+            self.pro_status = 1
         finally:
             LOG.info("登记执行日志")
             data_date = DateUtil.get_now_date_format("%Y%m%d")
@@ -235,7 +237,7 @@ class BatchArchiveInit(object):
                                                        self.org,
                                                        self.__args.batch)
             LOG.debug("old_log :{0}".format(old_log))
-            if old_log and self.pro_status == 1:
+            if old_log and self.pro_status == 0:
                 # 需要删除 旧的日志
                 didp_mon_run_log_his = DidpMonRunLogHis(
                     PROCESS_ID=old_log.PROCESS_ID,
@@ -286,7 +288,7 @@ class BatchArchiveInit(object):
             if self.session:
                 self.session.close()
             self.hive_util.close()
-            if self.pro_status == 1:
+            if self.pro_status == 0:
                 LOG.info("归档成功")
                 exit(0)
             else:
@@ -382,6 +384,8 @@ class BatchArchiveInit(object):
                     sql = sql + "comment '{comment_content}'".format(
                         comment_content=field.comment)
                 sql = sql + ","
+        # 增加删除标记和删除时间
+        sql = sql + " DELETE_FLG VARCHAR(1),DELETE_DT VARCHAR(8) ,"
         return sql[:-1]
 
     def count_date(self):
@@ -394,15 +398,14 @@ class BatchArchiveInit(object):
         date = ""
         hql = (
             "  SELECT  from_unixtime(unix_timestamp(`{date_col}`,'{date_format}'),"
-            "'yyyyMMdd') AS {col_date},count(1) \n"
+            "'yyyyMMdd') AS col_date,count(1) \n"
             "  FROM\n"
             "    {source_db}.{source_table_name} \n"
             "  GROUP BY\n"
             "    from_unixtime(unix_timestamp(`{date_col}`,'{date_format}'),'yyyyMMdd') \n "
             "  ORDER BY \n"
-            "    {col_date} ".format(date_col=self.date_col,
+            "    col_date ".format(date_col=self.date_col,
                                            date_format=self.date_format,
-                                           col_date=self.col_date,
                                            source_db=self.source_db,
                                            source_table_name=self.source_table_name))
         LOG.debug("执行SQL {0}".format(hql))
@@ -542,6 +545,10 @@ class BatchArchiveInit(object):
                                                     field.col_name,
                                                     field.data_type,
                                                     need_trim)
+        sql = sql + " ,'0' as {DELETE_FLG} ,null as {DELETE_DT}".format(
+            DELETE_FLG=table_alias + '.' + self._DELETE_FLG if not StringUtil.is_blank(
+                table_alias) else self._DELETE_FLG,
+            DELETE_DT=table_alias + '.' + self._DELETE_DT if not StringUtil.is_blank(table_alias) else self._DELETE_DT)
         return sql
 
     @staticmethod

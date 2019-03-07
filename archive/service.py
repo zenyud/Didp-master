@@ -179,11 +179,9 @@ class MetaDataService(object):
             if StringUtil.eq_ignore("# Partition Information", col_name):
                 break
             if filter_col_list:
-            if filter_col_list:
                 # 过滤过滤字段
                 if col_name.upper() in filter_col_list:
                     continue
-
             filed_info = HiveFieldInfo(col[0], col[1], col[2], col[3], col[4],
                                        col[5], i)
             source_field_infos.append(filed_info)
@@ -319,6 +317,7 @@ class MetaDataService(object):
         LOG.info("表历史元数据登记成功 ！ ")
         # 登记字段元数据
         LOG.info("登记字段元数据 ")
+        # i = 0
         for filed in source_field_info:
             column_id = get_uuid()
             meta_field_info = DidpMetaColumnInfo(
@@ -357,6 +356,16 @@ class MetaDataService(object):
 
             self.meta_column_info_his_dao.add_meta_column_his(
                 meta_field_info_his)
+            # i = i + 1
+            # if i == source_field_info.__len__():
+            #     i = filed.col_seq  # 记录最后一个字段序号
+        # 将删除标志和删除日期登记到元数据中
+        # delete_flg = HiveFieldInfo("DELETE_FLG", "VARCHAR(1)", '0', 'NO', None, None, i + 1)
+        # delete_dt = HiveFieldInfo("DELETE_DT", "VARCHAR(8)", None, 'No', None, None, i + 2)
+        # self.meta_column_info_dao.add_meta_column(delete_flg)
+        # self.meta_column_info_dao.add_meta_column(delete_dt)
+        # self.meta_column_info_his_dao.add_meta_column_his(delete_flg)
+        # self.meta_column_info_his_dao.add_meta_column_his(delete_dt)
         LOG.info("登记字段元数据成功 ！  ")
 
     def get_meta_table(self, schema_id, table_name):

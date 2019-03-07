@@ -36,6 +36,7 @@ class DidpHdsStructMetaCtrl(Base):
     """
         DIDP_HDS_STRUCT_META_CTRL
     """
+    __tablename__ = 'DIDP_HDS_STRUCT_META_CTRL'
     OBJECT_NAME = Column(primary_key=True)
     ORG_CODE = Column(primary_key=True)
 
@@ -177,6 +178,7 @@ class DidpMonRunLogHis(Base):
     REJECT_LINES = Column(nullable=False, default=0)  # 拒绝的记录数
     ERR_MESSAGE = Column()  # 错误信息
     EXTENDED1 = Column()  # 扩展字段1 记录save_mode
+    EXTENDED2 = Column()
     RECORD_TIME = Column(nullable=False, default=time.localtime())  # 创建时间
 
 
