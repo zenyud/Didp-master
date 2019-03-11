@@ -52,7 +52,7 @@ class ArchiveData(object):
     archive_count = 0  # 归档数据条数
     pro_start_date = None  # 流程开始时间
     pro_end_date = None  # 流程结束时间
-    __PRO_STATUS = "0"  # 加工状态
+    __PRO_STATUS = "0"  # 加工状态 0 成功，1失败
     error_msg = ""  # 错误信息
     is_already_load = False  # 是否已经归档完成
     _DELETE_FLG = "DELETE_FLG"  # 删除标记字段名 0 ：未删除 1 :已删除
@@ -100,8 +100,10 @@ class ArchiveData(object):
         self.buckets_num = self.__args.buckNum  # 分桶数
         self.cluster_col = self.__args.cluCol  # 分桶键
         self.source_data_mode = int(self.__args.sMode)  # 数据源模式
-        if self.source_data_mode == 0:
+        self.is_first_archive = False  # 判断是否是第一次归档
+        if self.source_data_mode == 3:
             self.source_data_mode = 1  # 初始化改全量
+            self.is_first_archive = True  # 是第一次归档
         self.system = self.__args.system  # 系统
         self.batch = self.__args.batch  # 批次号
         self.obj = self.__args.obj  # 对象名
@@ -430,16 +432,17 @@ class ArchiveData(object):
             登记元数据
         :return:
         """
+        # 获取表的评论
         table_comment = self.hive_util.get_table_comment(self.source_db,
                                                          self.source_table)
         # 先格式化dataDate
 
-        self.meta_data_service.upload_meta_data(self.__args.schID,
-                                                self.__args.db,
+        self.meta_data_service.upload_meta_data(self.schema_id,
+                                                self.db_name,
                                                 self.source_ddl,
-                                                self.__args.table,
-                                                self.release_date,
-                                                self.__args.buckNum,
+                                                self.table_name,
+                                                self.release_date,  # RELEASE_DATE 的日期是加了时分秒的日期
+                                                self.buckets_num,
                                                 self.common_dict,
                                                 table_comment,
                                                 self.project_id)
@@ -628,6 +631,9 @@ class ArchiveData(object):
 
                 meta_type_hive = field.hive_type
                 meta_type_ddl = field.ddl_type
+
+                # 忽略Varchar和Char不一致的错误
+
                 if not meta_type_hive or not meta_type_ddl:
                     # 新增字段 跳过
                     continue
@@ -868,7 +874,10 @@ class ArchiveData(object):
                                                             field.ddl_type.field_type,
                                                             need_trim)
                 else:
-                    sql = sql + ",''"
+                    if self.field_change_list.index(field) == 0:
+                        sql = sql + " ''"
+                    else:
+                        sql = sql + " ,'' "
         else:
             # 无字段变化的情况
             LOG.debug("无字段的变化 ~ ")
@@ -1069,7 +1078,7 @@ class ArchiveData(object):
         """
         归档程序运行入口
         :return:
-         1 - 成功 0 - 失败
+         0 - 成功 1 - 失败
         """
         try:
             LOG.info("------归档作业开始执行------")
@@ -1091,9 +1100,12 @@ class ArchiveData(object):
             LOG.info("元数据登记与更新")
             self.upload_meta_data()
 
-            if not self.hive_util.exist_table(self.__args.db,
-                                              self.__args.table):
+            if not self.hive_util.exist_table(self.db_name,
+                                              self.table_name):
+                LOG.info("表不存在，需要重建")
                 self.create_table()
+            else:
+                LOG.info("表已存在")
 
             LOG.debug("根据表定义变化信息更新表结构 ")
             self.change_table_columns()
@@ -1120,8 +1132,10 @@ class ArchiveData(object):
                 # LOG.info("入库的条数为{0}".format(self.archive_count))
 
             else:
-                LOG.error("待归档数据源为空！请检查装载是否正常")
-                raise BizException("待归档数据源为空！")
+                if self.is_first_archive:
+                    # 只有铺底的时候才报数据源为空的错  
+                    LOG.error("待归档数据源为空！请检查装载是否正常")
+                    raise BizException("待归档数据源为空！")
 
         except Exception as e:
             traceback.print_exc()
@@ -1987,6 +2001,7 @@ class AllArchive(ArchiveData):
                      "'transactional'='true')".
                      format(CLUSTER_COL=self.cluster_col,
                             BUCKET_NUM=self.buckets_num))
+
         LOG.info("执行SQL:{0}".format(hql))
         self.hive_util.execute(hql)
 
@@ -2377,16 +2392,16 @@ class ChainTransArchive(ArchiveData):
                     raise BizException("前一天没有做归档,不能做全量拉链归档 ")
         else:
             self.source_data_mode = SourceDataMode.ADD.value
-        LOG.info(
-            "归档表{db_name}.{table_name} 日期：{data_date} "
-            "以前未归档，归档模式按照 :{data_mode}  "
-                .format(db_name=self.db_name,
-                        table_name=self.table_name,
-                        data_date=self.data_date,
-                        data_mode=self.source_data_mode))
+            LOG.info(
+                "归档表{db_name}.{table_name} 日期：{data_date} "
+                "以前未归档，归档模式按照 :{data_mode}  "
+                    .format(db_name=self.db_name,
+                            table_name=self.table_name,
+                            data_date=self.data_date,
+                            data_mode=self.source_data_mode))
         self.log_head = ("结构化数据归档[表{db_name}.{table_name} "
                          "机构：{org} 日期：{data_date} "
-                         "数据源模式:{data_mode} 归档方式：{save_mode} ]"
+                         "数据源模式:{data_mode} 归档方式：{save_mode} "
                          .format(db_name=self.db_name,
                                  table_name=self.table_name,
                                  org=self.org,
@@ -2420,10 +2435,13 @@ class ChainTransArchive(ArchiveData):
             self.columns = self.not_compare_column.split(",")
 
     def count_archive_data(self):
-        hql = "SELECT COUNT(1) FROM {source_db}.{table_name} where {fil_sql}".format(
+        hql = "SELECT COUNT(1) FROM {source_db}.{table_name} ".format(
             source_db=self.source_db,
             table_name=self.source_table,
-            fil_sql=self.filter_sql)
+        )
+        LOG.info("执行SQL：{0}".format(hql))
+        if self.filter_sql:
+            hql = hql + " where " + self.filter_sql
         r = self.hive_util.execute_sql(hql)
         count = int(r[0][0])
         LOG.info("入库条数为：{0}".format(count))
@@ -2462,6 +2480,7 @@ class ChainTransArchive(ArchiveData):
         self.hive_util.execute(hql)
 
     def load_data(self):
+        LOG.debug("source_data_mode:{0}".format(self.source_data_mode))
         if self.source_data_mode == SourceDataMode.ALL.value:
             LOG.info("---全量拉链---")
             self.load_data_trans_all()

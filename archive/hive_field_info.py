@@ -82,6 +82,7 @@ class MetaTypeInfo(object):
     """
        字段类型
     """
+
     def __init__(self, field_type, field_length, field_scale):
         """
         :param field_type: 字段类型
@@ -102,8 +103,17 @@ class MetaTypeInfo(object):
             if obj.field_length == self.field_length and obj.field_type.__eq__(
                     self.field_type) and obj.field_scale == self.field_scale:
                 return True
+            elif obj.field_type.lower().__eq__("char") and self.field_type.lower().__eq__("varchar") \
+                    and obj.field_length == self.field_length \
+                    and obj.field_scale == self.field_scale:
+                return True
+            elif obj.field_type.lower().__eq__("varchar") and self.field_type.lower().__eq__("char") \
+                    and obj.field_length == self.field_length \
+                    and obj.field_scale == self.field_scale:
+                return True
             else:
                 return False
+
         elif obj is None:
             return False
         else:

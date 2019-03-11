@@ -9,8 +9,8 @@
 #
 # Remarks       :
 ################################################################################
-import os          # 系统模块
-import traceback   # 异常跟踪模块
+import os  # 系统模块
+import traceback  # 异常跟踪模块
 import jaydebeapi  # jdbc连接模块
 
 from didp_logger import Logger
@@ -31,6 +31,7 @@ class DbOperator(object):
        __jdbc_url: JDBC连接URL
        __jdbc_driver_path: JDBC驱动地址
     """
+
     def __init__(self, db_user, db_pwd, jdbc_class, jdbc_url, jdbc_driver=""):
         self.__curs = ""
         self.__conn = ""
@@ -74,24 +75,24 @@ class DbOperator(object):
         LOG.debug("连接数据库")
         try:
             if self.__jdbc_driver:
-                self.__conn = jaydebeapi.connect(self.__jdbc_class, 
+                self.__conn = jaydebeapi.connect(self.__jdbc_class,
                                                  self.__jdbc_url,
-                                                 {"user":"{0}".format(
+                                                 {"user": "{0}".format(
                                                      self.__db_user),
-                                                 "password":"{0}".format(
-                                                     self.__db_pwd)},
+                                                     "password": "{0}".format(
+                                                         self.__db_pwd)},
                                                  self.__jdbc_driver)
             else:
-                self.__conn = jaydebeapi.connect(self.__jdbc_class, 
+                self.__conn = jaydebeapi.connect(self.__jdbc_class,
                                                  self.__jdbc_url,
-                                                 {"user":"{0}".format(
+                                                 {"user": "{0}".format(
                                                      self.__db_user),
-                                                 "password":"{0}".format(
-                                                     self.__db_pwd)})
+                                                     "password": "{0}".format(
+                                                         self.__db_pwd)})
 
         except Exception as e:
             LOG.error("连接数据库失败")
-            traceback.print_exc() 
+            traceback.print_exc()
             raise
         else:
             LOG.debug("数据库连接成功")
@@ -135,9 +136,9 @@ class DbOperator(object):
                 self.__curs = self.__conn.cursor()
                 self.__curs.execute(sql)
                 affect_count = self.__curs.rowcount
-            except Exception as e:        
+            except Exception as e:
                 LOG.error("执行SQL失败")
-                traceback.print_exc() 
+                traceback.print_exc()
                 self.close()
                 raise
             else:
@@ -161,9 +162,9 @@ class DbOperator(object):
             self.__curs = self.__conn.cursor()
             self.__curs.execute(sql)
             affect_count = self.__curs.rowcount
-        except Exception as e:        
+        except Exception as e:
             LOG.error("执行SQL失败")
-            traceback.print_exc() 
+            traceback.print_exc()
             raise
 
         return affect_count
@@ -185,9 +186,9 @@ class DbOperator(object):
                 self.__curs = self.__conn.cursor()
                 self.__curs.execute(sql)
             result_info = self.__curs.fetchone()
-        except Exception as e:        
+        except Exception as e:
             LOG.error("执行SQL失败")
-            traceback.print_exc() 
+            traceback.print_exc()
             raise
         else:
             return result_info
@@ -208,9 +209,9 @@ class DbOperator(object):
             self.__curs = self.__conn.cursor()
             self.__curs.execute(sql)
             result_info = self.__curs.fetchall()
-        except Exception as e:        
+        except Exception as e:
             LOG.error("执行SQL失败")
-            traceback.print_exc() 
+            traceback.print_exc()
             self.close()
             raise
         else:
@@ -237,12 +238,19 @@ class DbOperator(object):
                 self.__curs = self.__conn.cursor()
                 self.__curs.execute(sql)
                 result_info = self.__curs.fetchall()
-            except Exception as e:        
+            except Exception as e:
                 LOG.error("执行SQL失败")
-                traceback.print_exc() 
+                traceback.print_exc()
                 self.close()
                 raise
             else:
                 self.close()
                 return result_info
+
+
+if __name__ == '__main__':
+
+
+    d = DbOperator("didp","didp","com.mysql.jdbc.Driver","jdbc:mysql://36.33.96.117:3306/didp_db?useSSL=true","F:\Didp-master\Didp-master\drivers\jdbc\mysql.jar")
+    d.connect()
 

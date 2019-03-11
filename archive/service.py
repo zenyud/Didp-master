@@ -157,7 +157,7 @@ class MetaDataService(object):
     def parse_input_table(hive_util, db_name, table_name, filter_cols):
         # type: (HiveUtil, str, str, str) -> list(HiveFieldInfo)
         """
-            解析接入表表结构
+            解析Hive表的表结构,
         :param db_name:
         :param table_name:
         :param filter_cols: 过滤字段 逗号分割
@@ -231,7 +231,7 @@ class MetaDataService(object):
             meta_field_info = self.meta_column_info_dao.get_meta_data_by_table(
                 table_id)  # 获取表字段元数据
 
-            # 判断是否发生 表结构变更
+            # 判断是否发生 表结构的变更 True 变更/ False 未变更
             is_change = self.get_change_result(source_field_info,
                                                meta_field_info, common_dict)
             LOG.info("表结构是否发生变化：{0}".format(is_change))
@@ -401,6 +401,7 @@ class MetaDataService(object):
             if source_field.col_name.upper() not in meta_field_names:
                 # 判断接入字段是否存在于元数据表中
                 LOG.debug("-------出现新增字段-------")
+
                 return True
             else:
                 for j in range(0, len(meta_field_info)):
@@ -417,8 +418,16 @@ class MetaDataService(object):
                                 not StringUtil.eq_ignore(
                                     meta_field_info[j].COL_SEQ,
                                     source_field.col_seq):
-                            LOG.debug("-----字段的精度发生了变化-------")
+                            LOG.debug("-----字段的精度或者字段序号发生了变化-------")
                             self.type_change = True
+                            LOG.debug("原始字段名：{0}，字段长度：{1}，字段序号：{2}".format(source_field.col_name,
+                                                                           source_field.col_length,
+                                                                           source_field.col_seq
+                                                                           ))
+                            LOG.debug("现字段名:{0},字段长度：{1}，字段序号:{2}".format(meta_field_info[j].COL_NAME,
+                                                                          meta_field_info[j].COL_LENGTH,
+                                                                          meta_field_info[j].COL_SEQ
+                                                                          ))
                             return True
 
                     # 判断字段备注改变是否增加新版本
@@ -757,4 +766,44 @@ class MonRunLogService(object):
 
 
 if __name__ == '__main__':
+    def get_session():
+        """
+         获取 sqlalchemy 的SESSION 会话
+        :return:
+        """
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        USER = os.environ["DIDP_CFG_DB_USER"]
+        PASSWORD = os.environ["DIDP_CFG_DB_PWD"]
+        DB_URL = os.environ["DIDP_CFG_DB_JDBC_URL"]
+        x = DB_URL.index("//")
+        y = DB_URL.index("?")
+        db_url = DB_URL[x + 2:y]
+
+        # db_name = db_login_info['db_name']
+
+        engine_str = ("mysql+mysqlconnector://{db_user}:{password}@{db_url}".
+                      format(db_user=USER, password=PASSWORD,
+                             db_url=db_url,
+                             ))
+        engine = create_engine(engine_str)
+        Session = sessionmaker(bind=engine)
+        session = Session()
+        return session
+
+    mata_service = MetaDataService(get_session())
+    hive_util = HiveUtil("501487c2fdc94190bf11c1b8ec8654fb")
+    source_ddl = mata_service.parse_input_table(hive_util, "dwsrdsdb", "r_808_xsys_saacnacn_init_20190222","bank_id,batch_dt")
+
+    meta_table_info = mata_service.get_meta_table("501487c2fdc94190bf11c1b8ec8654fb", "XSYS_SAACNACN_ALL")
+
+    if meta_table_info:
+        # 判断表结构是否发生变化，如果未发生变化 则进行元数据登记
+        # 获取源DDL信息
+        # 获取元数据DDL 信息
+        table_id = meta_table_info.TABLE_ID
+        meta_field_info = mata_service.meta_column_info_dao.get_meta_data_by_table(
+            table_id)  # 获取表字段元数据
+        common_dict = {"field.comment.change.ddl": "FALSE"}
+        mata_service.get_change_result(source_ddl,meta_field_info,common_dict)
     pass

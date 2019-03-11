@@ -33,8 +33,9 @@ class BatchArchiveInit(object):
     """
         批量初始化
     """
-    _DELETE_FLG="DELETE_FLG"
-    _DELETE_DT="DELETE_DT"
+    _DELETE_FLG = "DELETE_FLG"
+    _DELETE_DT = "DELETE_DT"
+
     def __init__(self):
 
         self.__args = self.archive_init()  # 参数初始化
@@ -76,7 +77,7 @@ class BatchArchiveInit(object):
             PartitionKey.DATE_SCOPE.value)  # 分区字段名
         self.date_col = self.__args.dateCol  # 日期字段
         self.date_format = self.__args.dateFm  # 日期字段格式
-        if self.__args.igErr is None :
+        if self.__args.igErr is None:
             self.__args.igErr = 0
         self.ignore_err_line = True if int(self.__args.igErr) == 1 else False  # 是否忽略错误行
 
@@ -405,9 +406,9 @@ class BatchArchiveInit(object):
             "    from_unixtime(unix_timestamp(`{date_col}`,'{date_format}'),'yyyyMMdd') \n "
             "  ORDER BY \n"
             "    col_date ".format(date_col=self.date_col,
-                                           date_format=self.date_format,
-                                           source_db=self.source_db,
-                                           source_table_name=self.source_table_name))
+                                   date_format=self.date_format,
+                                   source_db=self.source_db,
+                                   source_table_name=self.source_table_name))
         LOG.debug("执行SQL {0}".format(hql))
         result = self.hive_util.execute_sql(hql)
         for x in result:
