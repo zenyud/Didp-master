@@ -29,6 +29,8 @@ USER = os.environ["DIDP_CFG_DB_USER"]
 PASSWORD = os.environ["DIDP_CFG_DB_PWD"]
 DB_URL = os.environ["DIDP_CFG_DB_JDBC_URL"]
 PROCESS_TYPE = "5"  # 流程类型
+# 账号映射库
+ACCOUNT_MAP_TABLE = "HISCBUSDB.ARC_ACC_PTY"  # 账号引射表
 
 
 class ArchiveData(object):
@@ -65,7 +67,8 @@ class ArchiveData(object):
         self.hive_util = HiveUtil(self.__args.schID)
 
         self.common_dict = self.init_common_dict()  # 初始化公共参数
-
+        self.account_ctrl_dao = AccountCtrlDao(self.session)
+        self.account_list = None  # 需要做账号转移的账号列表
         self.filter_sql = self.__args.filSql  # 过滤Sql
         self.filter_cols = self.__args.filCol  # 过滤字段
         self.meta_data_service = MetaDataService(self.session)
@@ -75,7 +78,9 @@ class ArchiveData(object):
                            parse_input_table(self.hive_util,
                                              self.__args.sDb,
                                              self.__args.sTable,
-                                             self.filter_cols))
+                                             self.filter_cols,
+                                             True
+                                             ))
 
         self.db_name = self.__args.db  # 目标库
         self.table_name = self.__args.table  # 目标表
@@ -298,6 +303,10 @@ class ArchiveData(object):
         parser.add_argument("-addRg", required=False,
                             help="增量历史表日期分区范围（当归档方式为历史全量，"
                                  "且源数据为增量时传入）,格式同dtRange")
+
+        # parser.add_argument("-accList", required=False,
+        #                     help="账号代理键字段列表"
+        #                     )
         args = parser.parse_args()
         return args
 
@@ -445,7 +454,8 @@ class ArchiveData(object):
                                                 self.buckets_num,
                                                 self.common_dict,
                                                 table_comment,
-                                                self.project_id)
+                                                self.project_id,
+                                                self.hive_util)
 
     @abc.abstractmethod
     def create_table(self):
@@ -788,6 +798,38 @@ class ArchiveData(object):
                                                                               DELETE_DT=self._DELETE_DT)
         return sql[:-1]
 
+    def alter_table(self):
+        """
+            修改表结构
+        :return:
+        """
+
+        if len(self.account_list) > 0:
+            # 先获取全部字段的字段类型
+            LOG.info("存在账号转移字段，更新表结构")
+            for account_field in self.account_list:
+                # 遍历账号字段
+                #  将源字段加上ORI标识
+                field_type = self.hive_util.get_column_desc(self.db_name, self.table_name, account_field.COL_NAME)[0][1]
+                hql = "ALTER TABLE {db_name}.{table_name} CHANGE {col_name} {col_name2} {col_type}".format(
+                    db_name=self.db_name,
+                    table_name=self.table_name,
+                    col_name=account_field.COL_NAME,
+                    col_name2=account_field.COL_NAME + '_ORI',
+                    col_type=field_type
+                )
+                LOG.info("执行SQL:{0}".format(hql))
+                self.hive_util.execute(hql)
+                # 增加新字段
+                hql = "ALTER TABLE {db_name}.{table_name} ADD COLUMNS ({col_name} {col_type})".format(
+                    db_name=self.db_name,
+                    table_name=self.table_name,
+                    col_name=account_field.COL_NAME,
+                    col_type=field_type
+                )
+                LOG.info("执行SQL：{0}".format(hql))
+                self.hive_util.execute(hql)
+
     def create_where_sql(self, table_alias, data_date, data_partition_range,
                          date_scope, org_pos, org, where_from_arg):
         """
@@ -854,7 +896,7 @@ class ArchiveData(object):
             # 如果字段有变化
             LOG.debug("有字段的变化~ ")
             for field in self.field_change_list:
-                is_exists = False
+                is_exists = False  # hive中的字段DDL里是否存在
                 for ddl_field in self.source_ddl:
 
                     if StringUtil.eq_ignore(ddl_field.col_name,
@@ -874,10 +916,11 @@ class ArchiveData(object):
                                                             field.ddl_type.field_type,
                                                             need_trim)
                 else:
-                    if self.field_change_list.index(field) == 0:
-                        sql = sql + " ''"
-                    else:
-                        sql = sql + " ,'' "
+                    if not StringUtil.eq_ignore(field.col_name[-4:].upper(), "_ORI"):
+                        if self.field_change_list.index(field) == 0:
+                            sql = sql + " ''"
+                        else:
+                            sql = sql + " ,'' "
         else:
             # 无字段变化的情况
             LOG.debug("无字段的变化 ~ ")
@@ -1074,6 +1117,12 @@ class ArchiveData(object):
             self.hive_util.execute(
                 "DROP TABLE {0}.{1} ".format(db_name, table_name))
 
+    def get_ext_key(self):
+        """
+            获取代理表名，字段名
+        :return:
+        """
+
     def run(self):
         """
         归档程序运行入口
@@ -1094,11 +1143,12 @@ class ArchiveData(object):
 
             LOG.info("参数初始化2 ")
             self.init_ext()
+
+            LOG.info("读取账号转移配置表")
+            self.read_acct_table()
+
             LOG.info("元数据处理、表并发处理")
             self.meta_lock()
-
-            LOG.info("元数据登记与更新")
-            self.upload_meta_data()
 
             if not self.hive_util.exist_table(self.db_name,
                                               self.table_name):
@@ -1106,6 +1156,12 @@ class ArchiveData(object):
                 self.create_table()
             else:
                 LOG.info("表已存在")
+
+            self.alter_table()  # 更新表结构
+
+            LOG.info("元数据登记与更新")
+            # 根据目标表结构进行元数据的登记与更新
+            self.upload_meta_data()
 
             LOG.debug("根据表定义变化信息更新表结构 ")
             self.change_table_columns()
@@ -1133,7 +1189,7 @@ class ArchiveData(object):
 
             else:
                 if self.is_first_archive:
-                    # 只有铺底的时候才报数据源为空的错  
+                    # 只有铺底的时候才报错，日常归档不报错
                     LOG.error("待归档数据源为空！请检查装载是否正常")
                     raise BizException("待归档数据源为空！")
 
@@ -1173,6 +1229,16 @@ class ArchiveData(object):
     def clean(self):
         if self.is_drop_tmp_table:
             self.drop_table(self.temp_db, self.app_table_name1)
+
+    def read_acct_table(self):
+        """
+            读取账号转移配置表
+        :return:
+        """
+        account_list = self.account_ctrl_dao.get_account_cols(self.schema_id, self.table_name)
+        if len(account_list) > 0:
+            # 存在机构转移字段
+            self.account_list = account_list
 
 
 class LastAddArchive(ArchiveData):
@@ -1261,8 +1327,8 @@ class LastAddArchive(ArchiveData):
         self.hive_util.execute(hql)
         # 插入数据
 
-        hql = ("FROM {source_db_name}.{source_table_name} \n"
-               "  INSERT INTO TABLE {db_name}.{table_name} {partition_sql} \n"
+        hql = ("FROM {source_db_name}.{source_table_name} S \n"
+               "  INSERT INTO TABLE {db_name}.{table_name} {partition_sql} \n "
                "  SELECT  '{data_date}',".
                format(source_db_name=self.source_db,
                       source_table_name=self.source_table,
@@ -1278,6 +1344,35 @@ class LastAddArchive(ArchiveData):
 
         # 构造字段的sql
         hql = hql + self.build_load_column_sql("", True)
+
+        # 关联HISCBUSDB表 获取账号代理键
+        if len(self.account_list) > 0:
+            i = 0
+            for col in self.account_list:
+                if i == 0:
+                    hql = hql + ", "
+                if int(col.ACCT_TYPE) == 1:
+                    # 主键
+                    account_value = "concat(###, S.{0})".format(col.col_name + "_ORI")
+                elif int(col.ACCT_TYPE) == 2:
+                    account_value = "S" + col.col_name + "_ORI"
+                table_alias = "T" + str(i)
+                hql = hql + " CASE WHEN  {T}.ACC_PTY is not null then {T}.ACC_PTY " \
+                            " ELSE {account_value} END {col_name} ,".format(
+                    T=table_alias,
+                    account_value=account_value,
+                    col_name=col.col_name
+                )
+                i = i + 1
+            i = 0
+            for col in self.account_list:
+                if i == 0:
+                    hql = hql[:-1]  # 删除末尾的逗号
+                table_alias = "T" + str(i)
+                hql = hql + " LEFT JOIN {TABLE_NAME} AS {T} " \
+                            "ON  {T}.ACC_NO = S.{col_name} ".format(T=table_alias,
+                                                                    TABLE_NAME=ACCOUNT_MAP_TABLE,
+                                                                    col_name=col.COL_NAME)
         if not StringUtil.is_blank(self.filter_sql):
             # 如果有过滤条件,加入过滤条件
             hql = hql + "\n  WHERE {filter_col}".format(
@@ -1972,7 +2067,7 @@ class AllArchive(ArchiveData):
                                                   ))
         if self.org_pos == OrgPos.COLUMN.value:
             hql = hql + ",{COL_ORG} VARCHAR(10) ".format(COL_ORG=self.col_org)
-
+        # 如果有账号转移，需要在建表的时候加入账号转移字段。
         for field in self.source_ddl:
             hql = hql + (",{field_name} {field_type} ".
                          format(field_name=field.col_name_quote,
