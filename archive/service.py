@@ -100,7 +100,7 @@ class MetaDataService(object):
     just_delete_col = False
     type_change = False
     field_comment_change = False
-
+    contain_add_cols = False
     def __init__(self, session):
         self.session = session
         self.meta_table_info_his_dao = MetaTableInfoHisDao(self.session)
@@ -154,10 +154,11 @@ class MetaDataService(object):
             return None
 
     @staticmethod
-    def parse_input_table(hive_util, db_name, table_name, filter_cols):
-        # type: (HiveUtil, str, str, str) -> list(HiveFieldInfo)
+    def parse_input_table(hive_util, db_name, table_name, filter_cols, need_filter):
+        # type: (HiveUtil, str, str, str,bool) -> list(HiveFieldInfo)
         """
-            解析Hive表的表结构,
+            解析Hive表的表结构
+        :param need_filter: 是否进行字段过滤 True 需要过滤， False 不需要过滤
         :param db_name:
         :param table_name:
         :param filter_cols: 过滤字段 逗号分割
@@ -167,10 +168,9 @@ class MetaDataService(object):
 
         # 字段信息
         cols = hive_util.get_table_desc(db_name, table_name)
-
         filter_col_list = None
         #  过滤不需要的字段
-        if filter_cols:
+        if filter_cols and need_filter:
             filter_col_list = [col.upper() for col in filter_cols.split(",")]
 
         i = 0  # 字段序号从0开始
@@ -190,8 +190,7 @@ class MetaDataService(object):
 
     def upload_meta_data(self, schema_id, db_name, source_ddl, table_name,
                          data_date, bucket_num,
-                         common_dict, source_table_comment, project_id):
-        # type: (str, str, str, str, str, str, dict,str, str) -> None
+                         common_dict, source_table_comment, project_id,hive_util):
 
         """
             登记元数据
@@ -220,7 +219,7 @@ class MetaDataService(object):
             raise BizException("接入表信息解析失败！请检查接入表是否存在 ")
         LOG.info("接入表字段数为：{0}".format(length))
 
-        # 取元数据信息
+        # 取历史库表结构信息
         meta_table_info = self.get_meta_table(schema_id, table_name)
 
         if meta_table_info:
@@ -230,8 +229,11 @@ class MetaDataService(object):
             table_id = meta_table_info.TABLE_ID
             meta_field_info = self.meta_column_info_dao.get_meta_data_by_table(
                 table_id)  # 获取表字段元数据
-
+            #  去除过滤字段
             # 判断是否发生 表结构的变更 True 变更/ False 未变更
+
+            meta_field_info = self.filter_add_cols(meta_field_info, common_dict)
+
             is_change = self.get_change_result(source_field_info,
                                                meta_field_info, common_dict)
             LOG.info("表结构是否发生变化：{0}".format(is_change))
@@ -240,30 +242,34 @@ class MetaDataService(object):
             table_comment_change = self.get_table_comment_change_result(
                 source_table_comment, meta_table_info.TABLE_NAME_CN,
                 common_dict)
-            if not is_change and not table_comment_change:
+            #  判断是否有Batch_dt,或者Part_date
+            self.contain_add_cols = self.is_contain_add_cols(meta_field_info)
+            if not is_change and not table_comment_change and self.contain_add_cols:
                 LOG.debug("当日表元数据已登记,无需再登记 ！")
                 return
             else:
                 # 需要变更元数据信息
+                hive_field_info = self.parse_input_table(hive_util, db_name, table_name, None, False)
                 self.update_meta_info(table_id, schema_id, table_name,
                                       bucket_num,
                                       source_table_comment, data_date,
                                       source_field_info, meta_field_info,
-                                      project_id)
+                                      project_id,hive_field_info)
         # 直接登记元数据
         else:
-            self.register_meta_data(schema_id, source_field_info, table_name,
+            hive_field_info = self.parse_input_table(hive_util, db_name, table_name, None, False)  # 直接获取表结构
+            self.register_meta_data(schema_id, hive_field_info, table_name,
                                     bucket_num, source_table_comment, data_date,
                                     project_id)
 
-    def register_meta_data(self, schema_id, source_field_info, table_name,
+    def register_meta_data(self, schema_id, hive_field_info, table_name,
                            bucket_num, source_table_comment, data_date,
                            project_id):
         # type: (str, list(HiveFieldInfo), str, str, str, str, str) -> None
         """
             登记元数据信息
         :param schema_id:
-        :param source_field_info: 接入字段信息
+        :param hive_field_info: 目标表字段信息
         :param table_name: 归档表名
         :param bucket_num: 分桶数
         :param source_table_comment: 接入表备注
@@ -318,7 +324,7 @@ class MetaDataService(object):
         # 登记字段元数据
         LOG.info("登记字段元数据 ")
         # i = 0
-        for filed in source_field_info:
+        for filed in hive_field_info:
             column_id = get_uuid()
             meta_field_info = DidpMetaColumnInfo(
                 COLUMN_ID=column_id,
@@ -353,19 +359,8 @@ class MetaDataService(object):
                 COL_DEFAULT=filed.default_value,
                 NULL_FLAG=filed.not_null
             )
-
             self.meta_column_info_his_dao.add_meta_column_his(
                 meta_field_info_his)
-            # i = i + 1
-            # if i == source_field_info.__len__():
-            #     i = filed.col_seq  # 记录最后一个字段序号
-        # 将删除标志和删除日期登记到元数据中
-        # delete_flg = HiveFieldInfo("DELETE_FLG", "VARCHAR(1)", '0', 'NO', None, None, i + 1)
-        # delete_dt = HiveFieldInfo("DELETE_DT", "VARCHAR(8)", None, 'No', None, None, i + 2)
-        # self.meta_column_info_dao.add_meta_column(delete_flg)
-        # self.meta_column_info_dao.add_meta_column(delete_dt)
-        # self.meta_column_info_his_dao.add_meta_column_his(delete_flg)
-        # self.meta_column_info_his_dao.add_meta_column_his(delete_dt)
         LOG.info("登记字段元数据成功 ！  ")
 
     def get_meta_table(self, schema_id, table_name):
@@ -388,8 +383,7 @@ class MetaDataService(object):
         :return: True 有不一致字段
                 False 无不一致字段
         """
-        get_new_col = False
-        len_lower = False  # 字段数是否变少
+
         if len(source_field_info) != len(meta_field_info):
             LOG.debug("-----字段数发生变化------")
             return True
@@ -399,11 +393,13 @@ class MetaDataService(object):
             source_field = source_field_info[i]
 
             if source_field.col_name.upper() not in meta_field_names:
-                # 判断接入字段是否存在于元数据表中
-                LOG.debug("-------出现新增字段-------")
-
+                # 接入表出现新增字段
+                LOG.info("-------出现新增字段-------: 字段名：{0}".format(source_field.col_name.upper()))
+                # self.just_delete_col = False
                 return True
             else:
+                # self.just_delete_col = True
+                # 未出现新增字段,检查字段类型是否变更
                 for j in range(0, len(meta_field_info)):
                     if StringUtil.eq_ignore(meta_field_info[j].COL_NAME,
                                             source_field.col_name):
@@ -506,7 +502,7 @@ class MetaDataService(object):
     def update_meta_info(self, table_id, schema_id, table_name, bucket_num,
                          source_table_comment,
                          data_date, source_field_info, meta_field_infos,
-                         project_id):
+                         project_id,hive_field_info):
         """
             更新元数据信息  如果只是减少了字段 则不改变当前表结构，当前元数据不进行变更
 
@@ -521,6 +517,16 @@ class MetaDataService(object):
         :param project_id: 项目ID
         :return:
         """
+        # 补录元数据
+        if not self.contain_add_cols:
+            # 直接删除字段元数据
+            self.meta_column_info_dao.delete_all_column(table_id)
+            self.meta_table_info_dao.delete_meta_table_info(table_id)
+            self.register_meta_data(schema_id, hive_field_info, table_name,
+                                    bucket_num, source_table_comment, data_date,
+                                    project_id)
+            return
+
         if not self.just_delete_col:
             # 如果不是只是减少了字段 就直接更新
             self.meta_table_info_dao.delete_meta_table_info(table_id)
@@ -639,37 +645,79 @@ class MetaDataService(object):
                     self.meta_column_info_his_dao.add_meta_column_his(
                         meta_field_info_his)
 
-        if self.just_delete_col:
-            # 表元数据不用更新
-            if not self.type_change:
-                # 无需更新
-                LOG.debug("无新增字段或字段精度变化 ")
-            else:
-                for field in source_field_info:
-                    ddl_type = MetaTypeInfo(field.data_type, field.col_length,
-                                            field.col_scale)
-                    index = meta_field_info.index(field.col_name)
-                    meta_field = meta_field_info[index]
-                    meta_type = MetaTypeInfo(meta_field.COL_TYPE,
-                                             meta_field.COL_LENGTH,
-                                             meta_field.COL_SCALE)
 
-                    # 检查是否有字段精度的 更新
-                    if not ddl_type.__eq__(meta_type):
-                        # 对字段类型进行更新
-                        LOG.debug("字段精度更新")
-                        LOG.debug("{0} >> {1}".format(meta_type.get_whole_type,
-                                                      ddl_type.get_whole_type
-                                                      ))
-                        self.meta_column_info_dao. \
-                            update_meta_column(table_id,
-                                               meta_field.COL_NAME,
-                                               {
-                                                   "COL_TYPE": ddl_type.field_type,
-                                                   "COL_LENGTH": ddl_type.field_length,
-                                                   "COL_SCALE": ddl_type.filed_scale
-                                               }
-                                               )
+
+
+        # if self.just_delete_col:
+        #     # 表元数据不用更新
+        #     if not self.type_change:
+        #         # 无需更新
+        #         LOG.debug("无新增字段或字段精度变化 ")
+        #     else:
+        #         for field in source_field_info:
+        #             ddl_type = MetaTypeInfo(field.data_type, field.col_length,
+        #                                     field.col_scale)
+        #             index = meta_field_info.index(field.col_name)
+        #             meta_field = meta_field_info[index]
+        #             meta_type = MetaTypeInfo(meta_field.COL_TYPE,
+        #                                      meta_field.COL_LENGTH,
+        #                                      meta_field.COL_SCALE)
+        #
+        #             # 检查是否有字段精度的 更新
+        #             if not ddl_type.__eq__(meta_type):
+        #                 # 对字段类型进行更新
+        #                 LOG.debug("字段精度更新")
+        #                 LOG.debug("{0} >> {1}".format(meta_type.get_whole_type,
+        #                                               ddl_type.get_whole_type
+        #                                               ))
+        #                 self.meta_column_info_dao. \
+        #                     update_meta_column(table_id,
+        #                                        meta_field.COL_NAME,
+        #                                        {
+        #                                            "COL_TYPE": ddl_type.field_type,
+        #                                            "COL_LENGTH": ddl_type.field_length,
+        #                                            "COL_SCALE": ddl_type.filed_scale
+        #                                        }
+        #                                        )
+
+    def filter_add_cols(self, meta_field_infos, common_dict):
+        """
+            过滤特殊字段
+        :return: list of meta_field_infos
+
+        """
+        meta_info_list = list()
+
+        fiter_cols = ["DELETE_FLG", "DELETE_DT"]
+        for add_col in AddColumn:
+            v = common_dict.get(add_col.value)
+            if v:
+                fiter_cols.append(v.upper().strip())
+        for part_col in PartitionKey:
+            x = common_dict.get(part_col.value)
+            if x:
+                fiter_cols.append(x.upper().strip())
+
+        for field in meta_field_infos:
+            if field.COL_NAME.upper() in fiter_cols:
+                continue
+            else:
+                meta_info_list.append(field)
+
+        return meta_info_list
+
+    def is_contain_add_cols(self, meta_field_info):
+        """
+            判断是否存在元数据字段
+        :param meta_field_info:
+        :return:
+        """
+        add_cols = ["BATCH_DT", "HDS_SDATE", "HDS_EDATE"]
+        is_contain = False
+        for field in meta_field_info:
+            if field.COL_NAME.upper() in add_cols:
+                return True
+        return False
 
 
 class MonRunLogService(object):
@@ -791,9 +839,11 @@ if __name__ == '__main__':
         session = Session()
         return session
 
+
     mata_service = MetaDataService(get_session())
     hive_util = HiveUtil("501487c2fdc94190bf11c1b8ec8654fb")
-    source_ddl = mata_service.parse_input_table(hive_util, "dwsrdsdb", "r_808_xsys_saacnacn_init_20190222","bank_id,batch_dt")
+    source_ddl = mata_service.parse_input_table(hive_util, "dwsrdsdb", "r_808_xsys_saacnacn_init_20190222",
+                                                "bank_id,batch_dt")
 
     meta_table_info = mata_service.get_meta_table("501487c2fdc94190bf11c1b8ec8654fb", "XSYS_SAACNACN_ALL")
 
@@ -805,5 +855,5 @@ if __name__ == '__main__':
         meta_field_info = mata_service.meta_column_info_dao.get_meta_data_by_table(
             table_id)  # 获取表字段元数据
         common_dict = {"field.comment.change.ddl": "FALSE"}
-        mata_service.get_change_result(source_ddl,meta_field_info,common_dict)
+        mata_service.get_change_result(source_ddl, meta_field_info, common_dict)
     pass

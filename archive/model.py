@@ -31,6 +31,20 @@ class DidpHdsStructArchiveCtrl(Base):
     OBJECT_NAME = Column(String(10), primary_key=True)
     ORG_CODE = Column(String(20), primary_key=True)
 
+class DidpAccountCtrl(Base):
+    """
+
+    """
+    __table_name__= 'DIDP_ACCT_PTY_COL_CONFIG'
+    SCHEMA_KEY = Column(primary_key=True,nullable=False)
+    TABLE_NAME = Column(primary_key=True)
+    COLUMN_NAME = Column(primary_key=True)
+    ACCT_TYPE = Column()
+
+class DidpSchemaInfo(Base):
+    __table_name__ ='DIDP_META_SCHEMA_INFO'
+    SCHEMA_ID = Column(primary_key=True)
+    SCHEMA_NAME = Column(primary_key=False)
 
 class DidpHdsStructMetaCtrl(Base):
     """

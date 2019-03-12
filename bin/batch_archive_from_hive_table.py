@@ -61,7 +61,9 @@ class BatchArchiveInit(object):
             parse_input_table(self.hive_util,
                               self.source_db,
                               self.source_table_name,
-                              self.filter_cols)
+                              self.filter_cols,
+                              True
+                              )
 
         # 日期字段名
         self.col_date = self.common_dict.get(AddColumn.COL_DATE.value)
@@ -199,9 +201,6 @@ class BatchArchiveInit(object):
         try:
             LOG.info("接入表结构解析，元数据登记 ")
             self.process_ddl()
-            if not self.hive_util.exist_table(self.db_name, self.table_name):
-                LOG.info("创建归档表 ")
-                self.create_table()
 
             LOG.info("统计日期，并对日期做合法性判断")
             self.count_date()
@@ -306,6 +305,9 @@ class BatchArchiveInit(object):
         now_date = DateUtil().get_now_date_standy()
         source_table_comment = self.hive_util. \
             get_table_comment(self.source_db, self.source_table_name)
+        if not self.hive_util.exist_table(self.db_name, self.table_name):
+            LOG.info("创建归档表 ")
+            self.create_table()
         # 登记元数据
         self.meta_data_service.upload_meta_data(self.schema_id,
                                                 self.db_name,
@@ -315,9 +317,9 @@ class BatchArchiveInit(object):
                                                 self.bucket_num,
                                                 self.common_dict,
                                                 source_table_comment,
-                                                self.project_id
+                                                self.project_id,
+                                                self.hive_util
                                                 )
-
     def create_table(self):
         """
             创建归档表

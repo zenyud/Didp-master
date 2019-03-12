@@ -7,11 +7,10 @@
 # Remarks       :
 import os
 
-import enum
-import sys
+from enum import Enum
 
 
-class DatePartitionRange(enum.Enum):
+class DatePartitionRange(Enum):
     """
         日期分区范围枚举
     """
@@ -21,7 +20,7 @@ class DatePartitionRange(enum.Enum):
     YEAR = "Y"
 
 
-class SaveMode(enum.Enum):
+class SaveMode(Enum):
     """归档模式"""
     ALL = "1"
     ADD = "2"
@@ -30,19 +29,19 @@ class SaveMode(enum.Enum):
     LAST_ADD = "6"
 
 
-class OrgPos(enum.Enum):
+class OrgPos(Enum):
     NONE = 1
     COLUMN = 2
     PARTITION = 3
 
 
-class PartitionKey(enum.Enum):
+class PartitionKey(Enum):
     DATE_SCOPE = "partition.key.date.scope"
     ORG = "partition.key.org"
     GROUP = "back_code"
 
 
-class DataArchiveConstance(enum.Enum):
+class DataArchiveConstance(Enum):
     # 归档数据对象
     OBJ_NAME = "obj"
 
@@ -84,7 +83,7 @@ class DataArchiveConstance(enum.Enum):
     # 且源数据为增量时传入），格式 dbname.tablename
 
 
-class AddColumn(enum.Enum):
+class AddColumn(Enum):
     """
         增加字段
     """
@@ -100,13 +99,13 @@ class AddColumn(enum.Enum):
     # TEMP_TAIL = "hds___tail"
 
 
-class CommentChange(enum.Enum):
+class CommentChange(Enum):
     TABLE_COMMENT_CHANGE_DDL = "table.comment.change.ddl"
     # ddl字段备注改变是否需要增加新版本
     FIELD_COMMENT_CHANGE_DDL = "field.comment.change.ddl"
     GROUP = "back_code"
 
 
-class SourceDataMode(enum.Enum):
+class SourceDataMode(Enum):
     ALL = 1
     ADD = 2

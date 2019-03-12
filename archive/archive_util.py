@@ -314,6 +314,19 @@ class HiveUtil(object):
         # self.db_oper.close()
         return result
 
+    def get_column_desc(self, db_name, table_name, col_name):
+        """
+            获取字段的描述
+        :param db_name:
+        :param table_name:
+        :param col_name:
+        :return:
+        """
+        sql1 = "use {database}".format(database=db_name)
+        sql = "desc {table}.{col_name}".format(table=table_name, col_name=col_name)
+        self.db_oper.do(sql1)
+        return self.db_oper.fetchall(sql)
+
     def execute_with_dynamic(self, sql):
         """
             开启动态分区
