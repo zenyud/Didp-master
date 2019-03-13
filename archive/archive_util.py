@@ -322,10 +322,16 @@ class HiveUtil(object):
         :param col_name:
         :return:
         """
+
         sql1 = "use {database}".format(database=db_name)
         sql = "desc {table}.{col_name}".format(table=table_name, col_name=col_name)
-        self.db_oper.do(sql1)
-        return self.db_oper.fetchall(sql)
+        try:
+            self.db_oper.do(sql1)
+            LOG.debug("执行SQL %s" % sql)
+            result = self.db_oper.fetchall(sql)
+        except Exception as e:
+            result = None
+        return result
 
     def execute_with_dynamic(self, sql):
         """

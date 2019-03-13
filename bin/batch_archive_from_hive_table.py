@@ -22,13 +22,14 @@ from archive.db_operator import CommonParamsDao, ProcessDao
 from archive.archive_enum import AddColumn, DatePartitionRange, OrgPos, \
     PartitionKey
 from archive.archive_util import HiveUtil, BizException, DateUtil, StringUtil
-from archive.model import DidpMonRunLog, DidpMonRunLogHis
+from archive.model import DidpMonRunLog, DidpMonRunLogHis, DidpAccount
 from archive.service import MetaDataService, MonRunLogService
 from utils.didp_logger import Logger
 
 LOG = Logger()
 
-
+# ACCOUNT_MAP_TABLE = "HISCBUSDB.ARC_ACC_PTY"  # 账号引射表
+ACCOUNT_MAP_TABLE = "test.ARC_ACC_PTY"  # 账号引射表
 class BatchArchiveInit(object):
     """
         批量初始化
@@ -44,6 +45,14 @@ class BatchArchiveInit(object):
         self.pro_start_date = DateUtil.get_now_date_standy()
         self.schema_id = self.__args.schID
         self.hive_util = HiveUtil(self.schema_id)
+
+        self.account_list = []  # 需要做账号转移的账号列表
+        if self.__args.priAcc:
+            for acc in self.__args.priAcc.split(","):
+                self.account_list.append(DidpAccount(acc, 1))
+        if self.__args.npriAcc:
+            for acc in self.__args.npriAcc.split(","):
+                self.account_list.append(DidpAccount(acc, 2))
         self.meta_data_service = MetaDataService(self.session)
         self.mon_run_log_service = MonRunLogService(self.session)
         self.source_db = self.__args.sDb  # 源库名
@@ -194,6 +203,8 @@ class BatchArchiveInit(object):
         parser.add_argument("-igErr", required=False, type=int,
                             help="是否忽略错误行（0-否 1-是）")
         parser.add_argument("-asset", required=False, help="是否补记数据资产（0-否 1-是）")
+        parser.add_argument("-priAcc", required=False, help="主键账号字段")
+        parser.add_argument("-npriAcc", required=False, help="非主键账号字段")
         args = parser.parse_args()
         return args
 
@@ -308,6 +319,7 @@ class BatchArchiveInit(object):
         if not self.hive_util.exist_table(self.db_name, self.table_name):
             LOG.info("创建归档表 ")
             self.create_table()
+        self.alter_table()
         # 登记元数据
         self.meta_data_service.upload_meta_data(self.schema_id,
                                                 self.db_name,
@@ -363,6 +375,49 @@ class BatchArchiveInit(object):
                             BUCKET_NUM=self.bucket_num))
         LOG.info("执行SQL: {0}".format(hql))
         self.hive_util.execute(hql)
+
+    def alter_table(self):
+        """
+            修改表结构
+        :return:
+        """
+
+        if len(self.account_list) > 0:
+            # 先获取全部字段的字段类型
+            LOG.info("存在账号转移字段，更新表结构")
+            # 获取 hive 字段信息
+            # hive_field_infos = hive_util.get_hive_meta_field(self.common_dict, self.db_name, self.table_name, False)
+            # hive_field_names = [ field.col_name.upper() for field in hive_field_infos]
+            for account_field in self.account_list:
+                col_name = account_field.col_name
+
+                r = self.hive_util.get_column_desc(self.db_name, self.table_name, col_name + "_ORI")
+
+                # 防止多次Alter出错
+                if r is None:
+                    # 遍历账号字段
+                    #  将源字段加上ORI标识
+                    col_name = account_field.col_name
+                    LOG.debug(col_name)
+                    field_type = self.hive_util.get_column_desc(self.db_name, self.table_name, col_name)[0][1]
+                    hql = "ALTER TABLE {db_name}.{table_name} CHANGE {col_name} {col_name2} {col_type}".format(
+                        db_name=self.db_name,
+                        table_name=self.table_name,
+                        col_name=account_field.col_name,
+                        col_name2=account_field.col_name + '_ORI',
+                        col_type=field_type
+                    )
+                    LOG.info("执行SQL:{0}".format(hql))
+                    self.hive_util.execute(hql)
+                    # 增加新字段
+                    hql = "ALTER TABLE {db_name}.{table_name} ADD COLUMNS ({col_name} {col_type})".format(
+                        db_name=self.db_name,
+                        table_name=self.table_name,
+                        col_name=account_field.col_name,
+                        col_type=field_type
+                    )
+                    LOG.info("执行SQL：{0}".format(hql))
+                    self.hive_util.execute(hql)
 
     def create_table_body(self, is_temp_table):
         """
@@ -450,20 +505,55 @@ class BatchArchiveInit(object):
         if run_log:
             raise BizException("{0} 已有归档，不能做批量初始化".format(run_log.BIZ_DATE))
 
+    def case_when_acct_no(self):
+        # 关联HISCBUSDB表 获取账号代理键
+        i = 0
+        hql = ""
+        for col in self.account_list:
+            # if i == 0:
+            #     hql = hql + ", "
+            account_value = ""
+            if col.col_type == 1:
+                # 主键
+                account_value = "concat('###', S.{0})".format(col.col_name)
+            elif col.col_type == 2:
+                account_value = "S." + col.col_name
+            table_alias = "T" + str(i)
+            hql = hql + " CASE WHEN  {T}.ACC_PTY is not null then {T}.ACC_PTY " \
+                        " ELSE {account_value} END {col_name} ,".format(
+                T=table_alias,
+                account_value=account_value,
+                col_name=col.col_name
+            )
+            i = i + 1
+        return hql
+
+    def left_join_acct_no(self):
+        hql = ""
+        i = 0
+        for col in self.account_list:
+            if i == 0:
+                hql = hql[:-1]  # 删除末尾的逗号
+            table_alias = "T" + str(i)
+            hql = hql + " LEFT JOIN {TABLE_NAME} AS {T} " \
+                        "ON  {T}.ACC_NO = S.{col_name} ".format(T=table_alias,
+                                                                TABLE_NAME=ACCOUNT_MAP_TABLE,
+                                                                col_name=col.col_name)
+            i = i + 1
+        return hql
+
     def load(self):
         """
             加载数据
         :return:
         """
-        hql = "  FROM {source_db}.{source_table} " \
-              "  INSERT INTO  TABLE \n" \
+        hql = "  INSERT INTO  TABLE \n" \
               "    {db_name}.{table_name} \n" \
               "  {partition} \n" \
               "  SELECT \n" \
               "    from_unixtime(unix_timestamp(`{date_col}`,'{date_col_format}')," \
               "'yyyyMMdd') AS {col_date}, " \
-            .format(source_db=self.source_db,
-                    source_table=self.source_table_name,
+            .format(
                     db_name=self.db_name,
                     table_name=self.table_name,
                     partition=self.create_partiton_sql(),
@@ -473,7 +563,10 @@ class BatchArchiveInit(object):
                     )
         if self.org_pos == OrgPos.COLUMN.value:
             hql = hql + " '{org}',".format(org=self.org)
-        hql = hql + self.build_load_column_sql(None, False) + ","
+        hql = hql + self.build_load_column_sql("", False)
+
+        if len(self.account_list) > 0:
+            hql = hql + self.case_when_acct_no()
 
         def switch_data_range(data_range):
             """
@@ -527,8 +620,14 @@ class BatchArchiveInit(object):
             hql = hql + " '{org}' AS {partition_org},". \
                 format(org=self.org,
                        partition_org=self.partition_org)
-        LOG.info("执行SQL:{0}".format(hql[:-1]))
-        self.hive_util.execute_with_dynamic(hql[:-1])
+        hql = hql[:-1] if hql[-1].__eq__(",") else hql
+        hql = hql + " FROM {source_db_name}.{source_table_name} S \n ".format(source_db_name=self.source_db,
+                                                                              source_table_name=self.source_table_name)
+        if len(self.account_list) > 0:
+            hql = hql + self.left_join_acct_no()
+
+        LOG.info("执行SQL:{0}".format(hql))
+        self.hive_util.execute_with_dynamic(hql)
 
     def build_load_column_sql(self, table_alias, need_trim):
         """
@@ -548,7 +647,7 @@ class BatchArchiveInit(object):
                                                     field.col_name,
                                                     field.data_type,
                                                     need_trim)
-        sql = sql + " ,'0' as {DELETE_FLG} ,null as {DELETE_DT}".format(
+        sql = sql + " ,'0' as {DELETE_FLG} ,null as {DELETE_DT} ,".format(
             DELETE_FLG=table_alias + '.' + self._DELETE_FLG if not StringUtil.is_blank(
                 table_alias) else self._DELETE_FLG,
             DELETE_DT=table_alias + '.' + self._DELETE_DT if not StringUtil.is_blank(table_alias) else self._DELETE_DT)

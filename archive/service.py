@@ -243,7 +243,10 @@ class MetaDataService(object):
                 source_table_comment, meta_table_info.TABLE_NAME_CN,
                 common_dict)
             #  判断是否有Batch_dt,或者Part_date
-            self.contain_add_cols = self.is_contain_add_cols(meta_field_info)
+
+            meta_field_info2 = self.meta_column_info_dao.get_meta_data_by_table(
+                table_id)
+            self.contain_add_cols = self.is_contain_add_cols(meta_field_info2)
             if not is_change and not table_comment_change and self.contain_add_cols:
                 LOG.debug("当日表元数据已登记,无需再登记 ！")
                 return
@@ -713,9 +716,11 @@ class MetaDataService(object):
         :return:
         """
         add_cols = ["BATCH_DT", "HDS_SDATE", "HDS_EDATE"]
-        is_contain = False
+
         for field in meta_field_info:
+
             if field.COL_NAME.upper() in add_cols:
+                LOG.debug("----- 不需要补录 ----")
                 return True
         return False
 

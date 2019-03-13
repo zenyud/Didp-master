@@ -212,7 +212,7 @@ class DbOperator(object):
         except Exception as e:
             LOG.error("执行SQL失败")
             traceback.print_exc()
-            self.close()
+            # self.close()
             raise
         else:
             return result_info
