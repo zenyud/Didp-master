@@ -11,6 +11,8 @@ import os
 import sys
 import traceback
 
+from utils.didp_log_recorder2 import LogRecorder
+
 reload(sys)
 sys.setdefaultencoding('utf8')
 sys.path.append("{0}".format(os.environ["DIDP_HOME"]))
@@ -30,8 +32,9 @@ PASSWORD = os.environ["DIDP_CFG_DB_PWD"]
 DB_URL = os.environ["DIDP_CFG_DB_JDBC_URL"]
 PROCESS_TYPE = "5"  # 流程类型
 # 账号映射库
-# ACCOUNT_MAP_TABLE = "HISCBUSDB.ARC_ACC_PTY"  # 账号引射表
-ACCOUNT_MAP_TABLE = "test.ARC_ACC_PTY"  # 账号引射表
+ACCOUNT_MAP_TABLE = "HDSCBUSDB.ARC_ACC_PTY"  # 账号映射表
+# ACCOUNT_MAP_TABLE = "test.ARC_ACC_PTY"  # 账号映射表
+ACCOUNT_PRE_STR = "account.pre.str"  # 主键类账号前缀
 
 
 class ArchiveData(object):
@@ -66,7 +69,6 @@ class ArchiveData(object):
         self.__args = self.archive_init()
         self.session = self.get_session()  # 数据库连接对象
         self.hive_util = HiveUtil(self.__args.schID)
-
         self.common_dict = self.init_common_dict()  # 初始化公共参数
         self.account_list = []  # 需要做账号转移的账号列表
         if self.__args.priAcc:
@@ -90,6 +92,7 @@ class ArchiveData(object):
 
         self.db_name = self.__args.db  # 目标库
         self.table_name = self.__args.table  # 目标表
+        self.account_ctl = AccountCtrlDao(self.session)  # 操作日志类
         # 日期字段名
         self.col_date = self.common_dict.get(AddColumn.COL_DATE.value)
         # 机构字段名
@@ -131,7 +134,7 @@ class ArchiveData(object):
         self.add_table = self.__args.addTab  # 增量表表名
         self.all_range = self.__args.allRg  # 全量表日期分区范围
         self.add_range = self.__args.addRg  # 增量表日期分区范围
-
+        self.account_table_name = None  # 账号转移临时表表名
         self.__print_arguments()  # 打印参数信息
 
     @abc.abstractmethod
@@ -210,6 +213,59 @@ class ArchiveData(object):
         if not temp_db:
             return self.db_name
         return temp_db
+
+    def create_temp_table_for_account(self):
+        """
+            如果有存在账号转移,则创建临时表
+        :return:
+        """
+        if len(self.account_list) > 0:
+            # 存在账号转移
+            self.account_table_name = self.source_table + "_account_tmp"
+            account_name_list = [acc.col_name.upper() for acc in self.account_list]
+            is_exist_table = self.hive_util.exist_table(self.source_db, self.account_table_name)
+            if is_exist_table:
+                self.hive_util.execute("drop table {0}.{1}".format(self.source_db, self.account_table_name))
+
+            hql = "CREATE TABLE IF NOT EXISTS {db_name}.{table_name} ( \n". \
+                format(db_name=self.source_db,
+                       table_name=self.account_table_name
+                       )
+            # 构建Body 语句
+            sql = ""
+            cols_str = ""
+            for field in self.source_ddl:
+                cols_str = cols_str + field.col_name + ","
+                col_name = field.col_name_quote
+                if field.col_name.upper() in account_name_list:
+                    col_name = field.col_name + "_ORI"
+                sql = sql + "{col_name} {field_type} ".format(
+                    col_name=col_name,
+                    field_type=field.get_full_type())
+                if not StringUtil.is_blank(field.comment):
+                    # 看是否有字段备注
+                    sql = sql + "comment '{comment_content}'".format(
+                        comment_content=field.comment)
+                sql = sql + ","
+            # 开始添加账号转移字段
+            for acc in account_name_list:
+                col_type = self.hive_util.get_column_desc(self.source_db, self.source_table, acc)[0][1]
+                sql = sql + "{col_name} {col_type} ,".format(col_name=acc, col_type=col_type)
+            hql = hql + sql[:-1] + " )"
+            LOG.info("执行SQL：%s" % hql)
+            self.hive_util.execute(hql)
+            # 导入数据
+            LOG.info("源数据导入到临时表")
+            hql = " INSERT INTO TABLE {DB}.{TABLE} SELECT {COLS} ".format(DB=self.source_db,
+                                                                          TABLE=self.account_table_name,
+                                                                          COLS=cols_str[:-1]
+                                                                          )
+            hql = hql + self.case_when_acct_no()[:-1] + " FROM {source_db}.{source_table} S ".format(
+                source_db=self.source_db,
+                source_table=self.source_table)
+            hql = hql + self.left_join_acct_no()
+            LOG.info("执行SQL %s" % hql)
+            self.hive_util.execute(hql)
 
     def init_common_dict(self):
         """
@@ -391,7 +447,7 @@ class ArchiveData(object):
             account_value = ""
             if col.col_type == 1:
                 # 主键
-                account_value = "concat('###', S.{0})".format(col.col_name)
+                account_value = "concat('{0}', S.{1})".format(self.common_dict.get(ACCOUNT_PRE_STR), col.col_name)
             elif col.col_type == 2:
                 account_value = "S." + col.col_name
             table_alias = "T" + str(i)
@@ -417,6 +473,12 @@ class ArchiveData(object):
                                                                 col_name=col.col_name)
             i = i + 1
         return hql
+
+    def register_acct_log(self):
+        """
+            记录账号转移的错误日志
+        :return:
+        """
 
     @staticmethod
     def get_data_scope(data_range, data_date):
@@ -938,116 +1000,121 @@ class ArchiveData(object):
         else:
             return tmp_str
 
+    # def build_load_column_sql(self, table_alias, need_trim):
+    #     """
+    #         构建column字段sql
+    #
+    #     :param table_alias: 表别名
+    #     :param need_trim:
+    #
+    #     :return:
+    #     """
+    #     sql = ""
+    #     account_name_list = []
+    #     if len(self.account_list) > 0:
+    #         account_name_list = [acc.col_name.upper() for acc in self.account_list]
+    #
+    #     if self.field_change_list:
+    #         # 如果字段有变化
+    #         LOG.debug("有字段的变化~ ")
+    #         for field in self.field_change_list:
+    #             if field.col_name.upper() in account_name_list:
+    #                 LOG.debug("过滤掉账户字段")
+    #                 continue
+    #             LOG.debug("当前字段是：{0}".format(field.col_name))
+    #             is_exists = False  # hive中的字段DDL里是否存在
+    #             for ddl_field in self.source_ddl:
+    #                 source_col_name = ddl_field.col_name
+    #                 if source_col_name.upper() in account_name_list:
+    #                     source_col_name = source_col_name + '_ORI'
+    #                 if StringUtil.eq_ignore(source_col_name,
+    #                                         field.col_name):
+    #                     is_exists = True
+    #                     break
+    #             if is_exists:
+    #                 col_name = ""
+    #                 if StringUtil.eq_ignore(field.col_name[-4:], "_ORI"):
+    #                     col_name = field.col_name[:-4]
+    #                 else:
+    #                     col_name = field.col_name
+    #                 LOG.debug("当前Col_name为：%s" % col_name)
+    #                 if self.field_change_list.index(field) == 0:
+    #                     type = field.ddl_type.field_type if field.ddl_type else field.hive_type.field_type
+    #                     sql = sql + self.build_column(table_alias,
+    #                                                   col_name,
+    #                                                   type,
+    #                                                   need_trim)
+    #
+    #                 else:
+    #                     type = field.ddl_type.field_type if field.ddl_type else field.hive_type.field_type
+    #                     sql = sql + "," + self.build_column(table_alias,
+    #                                                         col_name,
+    #                                                         type,
+    #                                                         need_trim)
+    #             else:
+    #                 LOG.debug("Hive字段名：%s" % field.col_name)
+    #
+    #                 if not StringUtil.eq_ignore(field.col_name[-4:].upper(), "_ORI"):
+    #                     if self.field_change_list.index(field) == 0:
+    #                         sql = sql + " ''"
+    #                     else:
+    #                         sql = sql + " ,'' "
+    #     else:
+    #         # 无字段变化的情况
+    #         LOG.debug("无字段的变化 ~ ")
+    #         for field in self.source_ddl:
+    #             if self.source_ddl.index(field) == 0:
+    #                 sql = sql + self.build_column(table_alias, field.col_name,
+    #                                               field.data_type,
+    #                                               need_trim)
+    #             else:
+    #                 sql = sql + "," + self.build_column(table_alias,
+    #                                                     field.col_name,
+    #                                                     field.data_type,
+    #                                                     need_trim)
+    #
+    #     # 添加删除标识, 删除日期
+    #     sql = sql + " ,'0' {DELETE_FLG} ,null {DELETE_DT}".format(
+    #         DELETE_FLG=self._DELETE_FLG,
+    #         DELETE_DT=self._DELETE_DT
+    #     )
+    #     return sql
+
     def build_load_column_sql(self, table_alias, need_trim):
         """
-            构建column字段sql
+                  构建column字段sql
 
-        :param table_alias: 表别名
-        :param need_trim:
+              :param table_alias: 表别名
+              :param need_trim:
 
-        :return:
-        """
+              :return:
+              """
         sql = ""
-        account_name_list = [acc.col_name.upper() for acc in self.account_list]
-
+        account_name_list = []
+        if len(self.account_list) > 0:
+            hive_field_infos = self.hive_util.get_hive_meta_field(self.common_dict, self.db_name, self.table_name, True)
+            self.field_change_list = self.get_change_list(self.source_ddl,
+                                                          hive_field_infos)
+            account_name_list = [acc.col_name.upper() for acc in self.account_list]
+        LOG.debug("ACCOUNT_NAME_LIST的长度是 {0}".format(len(account_name_list)))
         if self.field_change_list:
             # 如果字段有变化
             LOG.debug("有字段的变化~ ")
             for field in self.field_change_list:
                 if field.col_name.upper() in account_name_list:
-                    LOG.debug("过滤掉账户字段")
                     continue
                 LOG.debug("当前字段是：{0}".format(field.col_name))
                 is_exists = False  # hive中的字段DDL里是否存在
                 for ddl_field in self.source_ddl:
                     source_col_name = ddl_field.col_name
-                    if source_col_name.upper() in account_name_list:
-                        source_col_name = source_col_name + '_ORI'
-                    if StringUtil.eq_ignore(source_col_name,
-                                            field.col_name):
-                        is_exists = True
-                        break
-                if is_exists:
-                    col_name = ""
-                    if StringUtil.eq_ignore(field.col_name[-4:], "_ORI"):
-                        col_name = field.col_name[:-4]
-                    else:
-                        col_name = field.col_name
-                    LOG.debug("当前Col_name为：%s" % col_name)
-                    if self.field_change_list.index(field) == 0:
-                        type = field.ddl_type.field_type if field.ddl_type else field.hive_type.field_type
-                        sql = sql + self.build_column(table_alias,
-                                                      col_name,
-                                                      type,
-                                                      need_trim)
 
-                    else:
-                        type = field.ddl_type.field_type if field.ddl_type else field.hive_type.field_type
-                        sql = sql + "," + self.build_column(table_alias,
-                                                            col_name,
-                                                            type,
-                                                            need_trim)
-                else:
-                    LOG.debug("Hive字段名：%s" % field.col_name)
-
-                    if not StringUtil.eq_ignore(field.col_name[-4:].upper(), "_ORI"):
-                        if self.field_change_list.index(field) == 0:
-                            sql = sql + " ''"
-                        else:
-                            sql = sql + " ,'' "
-        else:
-            # 无字段变化的情况
-            LOG.debug("无字段的变化 ~ ")
-            for field in self.source_ddl:
-                if self.source_ddl.index(field) == 0:
-                    sql = sql + self.build_column(table_alias, field.col_name,
-                                                  field.data_type,
-                                                  need_trim)
-                else:
-                    sql = sql + "," + self.build_column(table_alias,
-                                                        field.col_name,
-                                                        field.data_type,
-                                                        need_trim)
-
-        # 添加删除标识, 删除日期
-        sql = sql + " ,'0' {DELETE_FLG} ,null {DELETE_DT}".format(
-            DELETE_FLG=self._DELETE_FLG,
-            DELETE_DT=self._DELETE_DT
-        )
-        return sql
-
-    def build_load_column_sql2(self, table_alias, need_trim):
-        """
-              构建column字段sql
-
-          :param table_alias: 表别名
-          :param need_trim:
-
-          :return:
-          """
-        sql = ""
-        account_name_list = [acc.col_name.upper() for acc in self.account_list]
-
-        if self.field_change_list:
-            # 如果字段有变化
-            LOG.debug("有字段的变化~ ")
-            for field in self.field_change_list:
-
-                LOG.debug("Field_change_list 当前字段是：{0}".format(field.col_name))
-                if field.col_name.upper() in account_name_list:
-                    continue
-                is_exists = False  # hive中的字段DDL里是否存在
-                for ddl_field in self.source_ddl:
-
-                    source_col_name = ddl_field.col_name
-                    if source_col_name in account_name_list:
-                        source_col_name = source_col_name + "_ORI"
                     if StringUtil.eq_ignore(source_col_name,
                                             field.col_name):
                         is_exists = True
                         break
                 if is_exists:
                     col_name = field.col_name
+
                     if self.field_change_list.index(field) == 0:
                         type = field.ddl_type.field_type if field.ddl_type else field.hive_type.field_type
                         sql = sql + self.build_column(table_alias,
@@ -1063,21 +1130,16 @@ class ArchiveData(object):
                                                             need_trim)
                 else:
                     LOG.debug("Hive字段名：%s" % field.col_name)
-                    if not StringUtil.eq_ignore(field.col_name[-4:].upper(), "_ORI"):
-                        if self.field_change_list.index(field) == 0:
-                            sql = sql + " '',"
-                        else:
-                            sql = sql + " ,'' "
+                    if self.field_change_list.index(field) == 0:
+                        sql = sql + " ''"
                     else:
-                        col_name = table_alias + "." + field.col_name if table_alias else field.col_name
-                        if self.field_change_list.index(field) == 0:
-                            sql = sql + "{0}".format(col_name)
-                        else:
-                            sql = sql + ",{0}".format(col_name)
+                        sql = sql + " ,'' "
         else:
             # 无字段变化的情况
             LOG.debug("无字段的变化 ~ ")
             for field in self.source_ddl:
+                if field.col_name.upper() in account_name_list:
+                    continue
                 if self.source_ddl.index(field) == 0:
                     sql = sql + self.build_column(table_alias, field.col_name,
                                                   field.data_type,
@@ -1093,21 +1155,111 @@ class ArchiveData(object):
             DELETE_FLG=self._DELETE_FLG,
             DELETE_DT=self._DELETE_DT
         )
-        if len(account_name_list) > 0:
-            i = 0
-            for acc in account_name_list:
-                if table_alias:
-                    col_name = table_alias + "." + acc.upper()
-                else:
-                    col_name = acc.upper()
+        if len(self.account_list) > 0:
+            sql = sql + ","
 
-                if i == 0:
-                    sql = sql + "," + col_name + ","
-                else:
-                    sql = sql + col_name + ","
-                i=i+1
+            for acc in account_name_list:
+                if not StringUtil.is_blank(table_alias):
+                    acc = table_alias + "." + acc
+                sql = sql + acc + ","
             sql = sql[:-1]
+        LOG.debug("build_column %s" % sql)
         return sql
+
+    # def build_load_column_sql2(self, table_alias, need_trim):
+    #     """
+    #           构建column字段sql
+    #
+    #       :param table_alias: 表别名
+    #       :param need_trim:
+    #
+    #       :return:
+    #       """
+    #     sql = ""
+    #     account_name_list = []
+    #     if len(self.account_list) > 0:
+    #         account_name_list = [acc.col_name.upper() for acc in self.account_list]
+    #
+    #     if self.field_change_list:
+    #         # 如果字段有变化
+    #         LOG.debug("有字段的变化~ ")
+    #         for field in self.field_change_list:
+    #
+    #             LOG.debug("Field_change_list 当前字段是：{0}".format(field.col_name))
+    #             if field.col_name.upper() in account_name_list:
+    #                 continue
+    #             is_exists = False  # hive中的字段DDL里是否存在
+    #             for ddl_field in self.source_ddl:
+    #
+    #                 source_col_name = ddl_field.col_name
+    #                 if source_col_name in account_name_list:
+    #                     source_col_name = source_col_name + "_ORI"
+    #                 if StringUtil.eq_ignore(source_col_name,
+    #                                         field.col_name):
+    #                     is_exists = True
+    #                     break
+    #             if is_exists:
+    #                 col_name = field.col_name
+    #                 if self.field_change_list.index(field) == 0:
+    #                     type = field.ddl_type.field_type if field.ddl_type else field.hive_type.field_type
+    #                     sql = sql + self.build_column(table_alias,
+    #                                                   col_name,
+    #                                                   type,
+    #                                                   need_trim)
+    #
+    #                 else:
+    #                     type = field.ddl_type.field_type if field.ddl_type else field.hive_type.field_type
+    #                     sql = sql + "," + self.build_column(table_alias,
+    #                                                         col_name,
+    #                                                         type,
+    #                                                         need_trim)
+    #             else:
+    #                 LOG.debug("Hive字段名：%s" % field.col_name)
+    #                 if not StringUtil.eq_ignore(field.col_name[-4:].upper(), "_ORI"):
+    #                     if self.field_change_list.index(field) == 0:
+    #                         sql = sql + " '',"
+    #                     else:
+    #                         sql = sql + " ,'' "
+    #                 else:
+    #                     col_name = table_alias + "." + field.col_name if table_alias else field.col_name
+    #                     if self.field_change_list.index(field) == 0:
+    #                         sql = sql + "{0}".format(col_name)
+    #                     else:
+    #                         sql = sql + ",{0}".format(col_name)
+    #     else:
+    #         # 无字段变化的情况
+    #         LOG.debug("无字段的变化 ~ ")
+    #         for field in self.source_ddl:
+    #             if self.source_ddl.index(field) == 0:
+    #                 sql = sql + self.build_column(table_alias, field.col_name,
+    #                                               field.data_type,
+    #                                               need_trim)
+    #             else:
+    #                 sql = sql + "," + self.build_column(table_alias,
+    #                                                     field.col_name,
+    #                                                     field.data_type,
+    #                                                     need_trim)
+    #
+    #     # 添加删除标识, 删除日期
+    #     sql = sql + " ,'0' {DELETE_FLG} ,null {DELETE_DT}".format(
+    #         DELETE_FLG=self._DELETE_FLG,
+    #         DELETE_DT=self._DELETE_DT
+    #     )
+    #     if len(account_name_list) > 0:
+    #         i = 0
+    #         for acc in account_name_list:
+    #             if table_alias:
+    #                 col_name = table_alias + "." + acc.upper()
+    #             else:
+    #                 col_name = acc.upper()
+    #
+    #             if i == 0:
+    #                 sql = sql + "," + col_name + ","
+    #             else:
+    #                 sql = sql + col_name + ","
+    #             i = i + 1
+    #         sql = sql[:-1]
+    #     return sql
 
     def build_load_column_with_compare(self, compare_meta, base_meta,
                                        table_alias,
@@ -1122,6 +1274,9 @@ class ArchiveData(object):
         :return:  `id`,`name`,'' as sex
         """
         # 元数据DDL信息 source_ddl
+        account_name_list = []
+        if len(self.account_list) > 0:
+            account_name_list = [acc.col_name.upper() for acc in self.account_list]
 
         sql = ""
         field_change_list = self.get_change_list(compare_meta,
@@ -1131,6 +1286,9 @@ class ArchiveData(object):
         if field_change_list:
             # 如果有字段变化
             for field in field_change_list:
+                if field.col_name.upper() in account_name_list:
+                    # 不处理
+                    continue
                 if (field.col_name.upper() in base_col_names and
                         field.col_name.upper() in compare_col_names):
                     sql = sql + self.build_column(None, field.col_name,
@@ -1145,12 +1303,21 @@ class ArchiveData(object):
         else:
             # 无变化的情况
             for field in base_meta:
+                if field.col_name.upper() in account_name_list:
+                    continue
                 sql = sql + self.build_column(table_alias,
                                               field.col_name,
                                               field.data_type,
                                               need_trim) + ","
+
         # 加上删除标识和删除时间
-        sql = sql + " '0' delete_flg,null delete_dt ,"
+        sql = sql + " '0' delete_flg, null delete_dt ,"
+        if len(account_name_list) > 0:
+            # 在SQL的末端加上账号字段
+            for acc in account_name_list:
+                if not StringUtil.is_blank(table_alias):
+                    acc = table_alias + "." + acc
+                sql = sql + acc + ","
         return sql[:-1]
 
     @staticmethod
@@ -1371,6 +1538,9 @@ class ArchiveData(object):
             LOG.info("登记执行日志")
             self.pro_end_date = DateUtil.get_now_date_standy()
             self.register_run_log()
+
+            # 如果有账号关联 则记录
+            self.check_account_err()
             self.is_already_load = True
             LOG.info("删除临时表")
             self.clean()
@@ -1383,6 +1553,30 @@ class ArchiveData(object):
             else:
                 LOG.error("归档失败")
                 return -1
+
+    def check_account_err(self):
+        if len(self.account_list) > 0:
+
+            for acc in self.account_list:
+                if acc.col_type == 1:
+                    cols = acc.col_name + " like '{0}%' ".format(self.common_dict.get(ACCOUNT_PRE_STR))
+                    # 查看是否存在未关联上的记录
+                    hql = "SELECT COUNT(1) FROM {db_name}.{table_name} WHERE \n" \
+                          " {cols} and {where_sql} ".format(
+                        db_name=self.db_name,
+                        table_name=self.table_name,
+                        cols=cols[:-1],
+                        where_sql=self.create_where_sql(None, None, self.data_range,
+                                                        self.date_scope,
+                                                        self.org_pos,
+                                                        self.org,
+                                                        None))
+                    LOG.info("执行SQL %s" % hql)
+                    count = self.hive_util.execute_sql(hql)[0][0]
+                    if count > 0:
+                        # 登记错误日志
+                        LogRecorder(self.org, self.data_date, self.db_name, self.table_name, acc.col_name,
+                                    count).insert_current_record()
 
     @abc.abstractmethod
     def init_ext(self):
@@ -1471,7 +1665,16 @@ class LastAddArchive(ArchiveData):
         self.hive_util.execute(execute_sql)
 
     def load_data(self):
-
+        if len(self.account_list) > 0:
+            self.create_temp_table_for_account()  # 建表，导数据
+            # 更新source_ddl
+            self.source_ddl = (self.meta_data_service.
+                               parse_input_table(self.hive_util,
+                                                 self.source_db,
+                                                 self.account_table_name,
+                                                 self.filter_cols,
+                                                 True
+                                                 ))
         # 清空表数据
         hql = "TRUNCATE TABLE {DB_NAME}.{TABLE_NAME}".format(
             DB_NAME=self.db_name,
@@ -1484,7 +1687,7 @@ class LastAddArchive(ArchiveData):
             "  INSERT INTO TABLE {db_name}.{table_name} {partition_sql} \n "
             "  SELECT  '{data_date}',".
                 format(source_db_name=self.source_db,
-                       source_table_name=self.source_table,
+                       source_table_name=self.source_table if self.account_table_name is None else self.account_table_name,
                        db_name=self.db_name,
                        table_name=self.table_name,
                        partition_sql=self.create_partition_sql(self.data_range,
@@ -1498,12 +1701,10 @@ class LastAddArchive(ArchiveData):
         # 构造字段的sql
         hql = hql + self.build_load_column_sql("", True)
 
-        if len(self.account_list) > 0:
-            hql = hql + self.case_when_acct_no()[:-1]
-        hql = hql + " FROM {source_db_name}.{source_table_name} S \n ".format(source_db_name=self.source_db,
-                                                                              source_table_name=self.source_table)
-        if len(self.account_list) > 0:
-            hql = hql + self.left_join_acct_no()
+        hql = hql + " FROM {source_db_name}.{source_table_name} S \n ".format(
+            source_db_name=self.source_db,
+            source_table_name=self.source_table if self.account_table_name is None else self.account_table_name)
+
         if not StringUtil.is_blank(self.filter_sql):
             # 如果有过滤条件,加入过滤条件
             hql = hql + "\n  WHERE {filter_col}".format(
@@ -1591,8 +1792,8 @@ class LastAllArchive(ArchiveData):
         execute_sql = execute_sql + ("\n  CLUSTERED  BY ({CLUSTER_COL}) "
                                      "INTO {BUCKET_NUM} BUCKETS \n"
                                      "  STORED AS ORC \n"
-                                     "  TBLPROPERTIES('ORC.COMPRESS'='SNAPPY' ,"
-                                     "'TRANSACTIONAL'='TRUE')".
+                                     "  tblproperties('orc.compress'='SNAPPY' ,"
+                                     "'transactional'='true')".
                                      format(CLUSTER_COL=self.cluster_col,
                                             BUCKET_NUM=self.buckets_num))
         LOG.info("建表语句为：%s " % execute_sql)
@@ -1600,6 +1801,18 @@ class LastAllArchive(ArchiveData):
 
     def load_data(self):
         # self.pre_table = self.temp_db + "." + self.input_table_name
+
+        if len(self.account_list) > 0:
+            self.create_temp_table_for_account()  # 建表，导数据
+            # 更新source_ddl
+            self.source_ddl = (self.meta_data_service.
+                               parse_input_table(self.hive_util,
+                                                 self.source_db,
+                                                 self.account_table_name,
+                                                 self.filter_cols,
+                                                 True
+                                                 ))
+
         if StringUtil.eq_ignore(self.source_data_mode,
                                 SourceDataMode.ADD.value):
             # 增求全
@@ -1646,7 +1859,7 @@ class LastAllArchive(ArchiveData):
                            self.org,
                            None),
                        source_db=self.source_db,
-                       source_table=self.source_table,
+                       source_table=self.source_table if self.account_table_name is None else self.account_table_name,
                        build_key_sql_on=self.build_key_sql_on("A", "B",
                                                               self.pk_list)
                        ))
@@ -1658,7 +1871,7 @@ class LastAllArchive(ArchiveData):
             "  INSERT INTO {db_name}.{table_name}  \n"
             "  {partition_sql} SELECT '{data_date}', ".
                 format(source_db=self.source_db,
-                       source_table=self.source_table,
+                       source_table=self.source_table if self.account_table_name is None else self.account_table_name,
                        db_name=self.db_name,
                        table_name=self.table_name,
                        partition_sql=self.create_partition_sql(
@@ -1670,15 +1883,9 @@ class LastAllArchive(ArchiveData):
         if OrgPos.COLUMN.value == self.org_pos:
             hql = hql + " '{0}', ".format(self.org)
         hql = hql + self.build_load_column_sql(None, True)
-
-        # 如果有账号转移 则加入账号转移
-        if len(self.account_list) > 0:
-            hql = hql + self.case_when_acct_no()[:-1]
-        hql = hql + " FROM {source_db_name}.{source_table_name} S \n ".format(source_db_name=self.source_db,
-                                                                              source_table_name=self.source_table)
-        if len(self.account_list) > 0:
-            # 左连接
-            hql = hql + self.left_join_acct_no()
+        hql = hql + " FROM {source_db_name}.{source_table_name} S \n ".format(
+            source_db_name=self.source_db,
+            source_table_name=self.source_table if self.account_table_name is None else self.account_table_name)
 
         if not StringUtil.is_blank(self.filter_sql):
             # 如果有过滤条件,加入过滤条件
@@ -1698,7 +1905,7 @@ class LastAllArchive(ArchiveData):
                "  INSERT INTO {db_name}.{table_name} \n"
                "  {partition_sql} SELECT '{data_date}', ".
                format(source_db=self.source_db,
-                      source_table=self.source_table,
+                      source_table=self.source_table if self.account_table_name is None else self.account_table_name,
                       db_name=self.db_name,
                       table_name=self.table_name,
                       partition_sql=self.create_partition_sql(
@@ -1712,9 +1919,6 @@ class LastAllArchive(ArchiveData):
         hql = hql + self.build_load_column_sql(None, True)
 
         # 如果有账号转移 则加入账号转移
-        if len(self.account_list) > 0:
-            hql = hql + self.left_join_acct_no()
-
         if not StringUtil.is_blank(self.filter_sql):
             # 如果有过滤条件,加入过滤条件
             hql = hql + "\n  WHERE {filter_col}".format(
@@ -1826,6 +2030,17 @@ class AddArchive(ArchiveData):
         self.hive_util.execute(hql)
 
     def load_data(self):
+        if len(self.account_list) > 0:
+            self.create_temp_table_for_account()  # 建表，导数据
+            # 更新source_ddl
+            self.source_ddl = (self.meta_data_service.
+                               parse_input_table(self.hive_util,
+                                                 self.source_db,
+                                                 self.account_table_name,
+                                                 self.filter_cols,
+                                                 True
+                                                 ))
+
         LOG.debug("先根据数据日期删除表中数据")
         hql = ("DELETE FROM  {DB_NAME}.{TABLE_NAME} {PARTITION_SQL} \n"
                "  WHERE {WHERE_SQL} ".
@@ -1856,7 +2071,7 @@ class AddArchive(ArchiveData):
             "  INSERT INTO {db_name}.{table_name} \n"
             "  {partition_sql} SELECT '{data_date}', ".
                 format(source_db=self.source_db,
-                       source_table=self.source_table,
+                       source_table=self.source_table if self.account_table_name is None else self.account_table_name,
                        db_name=self.db_name,
                        table_name=self.table_name,
                        partition_sql=self.create_partition_sql(
@@ -1869,12 +2084,10 @@ class AddArchive(ArchiveData):
             hql = hql + " '{0}', ".format(self.org)
         hql = hql + self.build_load_column_sql(None, True)
         # 如果有账号转移 则加入账号转移
-        if len(self.account_list) > 0:
-            hql = hql + self.case_when_acct_no()[:-1]
-        hql = hql + " FROM {source_db_name}.{source_table_name} S \n ".format(source_db_name=self.source_db,
-                                                                              source_table_name=self.source_table)
-        if len(self.account_list) > 0:
-            hql = hql + self.left_join_acct_no()
+
+        hql = hql + " FROM {source_db_name}.{source_table_name} S \n ".format(
+            source_db_name=self.source_db,
+            source_table_name=self.source_table if self.account_table_name is None else self.account_table_name)
 
         if not StringUtil.is_blank(self.filter_sql):
             # 如果有过滤条件,加入过滤条件
@@ -1973,7 +2186,7 @@ class AddArchive(ArchiveData):
                "  {TEMP_DB}.{APP_TABLE} {PARTITION} \n"
                "  SELECT '{DATA_DATE}', ".
                format(SOURCE_DB=self.source_db,
-                      SOURCE_TABLE=self.source_table,
+                      SOURCE_TABLE=self.source_table if self.account_table_name is None else self.account_table_name,
                       TEMP_DB=self.temp_db,
                       APP_TABLE=self.app_table_name1,
                       PARTITION=self.create_partition_sql(self.data_range, "0",
@@ -1984,13 +2197,9 @@ class AddArchive(ArchiveData):
             hql = hql + "'{org}',".format(org=self.org)
         hql = hql + self.build_load_column_sql(None, True)
 
-        # 如果有账号转移 则加入账号转移
-        if len(self.account_list) > 0:
-            hql = hql + self.case_when_acct_no()[:-1]
-        hql = hql + " FROM {source_db_name}.{source_table_name} S \n ".format(source_db_name=self.source_db,
-                                                                              source_table_name=self.source_table)
-        if len(self.account_list) > 0:
-            hql = hql + self.left_join_acct_no()
+        hql = hql + " FROM {source_db_name}.{source_table_name} S \n ".format(
+            source_db_name=self.source_db,
+            source_table_name=self.source_table if self.account_table_name is None else self.account_table_name)
 
         if not StringUtil.is_blank(self.filter_sql):
             # 过滤sql
@@ -2081,7 +2290,7 @@ class AddArchive(ArchiveData):
             sql = sql + ("{COLS}  FROM {DB_NAME}.{TABLE_NAME}"
                          " WHERE {COL_DATE}<  '{DATA_DATE}'   "
                          .format(COL_DATE=self.col_date,
-                                 COLS=self.build_load_column_sql2(None, False),
+                                 COLS=self.build_load_column_sql(None, False),
                                  DB_NAME=self.db_name,
                                  TABLE_NAME=self.table_name,
                                  DATA_DATE=self.data_date
@@ -2146,8 +2355,8 @@ class AddArchive(ArchiveData):
                              ))
         if self.org_pos == OrgPos.COLUMN.value:
             sql = sql + " '{org}', ".format(org=self.org)
-        sql = sql + self.build_load_column_sql2("hds_temp_table",
-                                                False) + "\n WHERE "
+        sql = sql + self.build_load_column_sql("hds_temp_table",
+                                               False) + "\n WHERE "
         where_sql = ""
         for field in self.source_ddl:
             if field.col_name.upper() not in pk_list:
@@ -2265,6 +2474,16 @@ class AllArchive(ArchiveData):
         self.hive_util.execute(hql)
 
     def load_data(self):
+        if len(self.account_list) > 0:
+            self.create_temp_table_for_account()  # 建表，导数据
+            # 更新source_ddl
+            self.source_ddl = (self.meta_data_service.
+                               parse_input_table(self.hive_util,
+                                                 self.source_db,
+                                                 self.account_table_name,
+                                                 self.filter_cols,
+                                                 True
+                                                 ))
         #  先根据数据日期删除表中数据
         hql = ("DELETE FROM {DB_NAME}.{TABLE_NAME} {PARTITION} \n"
                "  WHERE {WHERE_SQL} \n".
@@ -2302,7 +2521,7 @@ class AllArchive(ArchiveData):
                "  {DB_NAME}.{TABLE_NAME} {PARTITION} \n"
                "  SELECT '{DATA_DATE}',".
                format(SOURCE_DB=self.source_db,
-                      SOURCE_TABEL_NAME=self.source_table,
+                      SOURCE_TABEL_NAME=self.source_table if self.account_table_name is None else self.account_table_name,
                       DB_NAME=self.db_name,
                       TABLE_NAME=self.table_name,
                       PARTITION=self.create_partition_sql(self.data_range,
@@ -2313,16 +2532,10 @@ class AllArchive(ArchiveData):
         if self.org_pos == OrgPos.COLUMN.value:
             hql = hql + " '{org}',".format(org=self.org)
         hql = hql + self.build_load_column_sql(None, True)
-        if len(self.account_list) > 0:
-            sql = self.case_when_acct_no()[:-1]
-            LOG.info("sql is :%s" % sql)
-            hql = hql + sql
-        hql = hql + " FROM {source_db_name}.{source_table_name} S \n ".format(source_db_name=self.source_db,
-                                                                              source_table_name=self.source_table)
-        if len(self.account_list) > 0:
-            sql = self.left_join_acct_no()
-            LOG.debug("sql is %s" % sql)
-            hql = hql + sql
+
+        hql = hql + " FROM {source_db_name}.{source_table_name} S \n ".format(
+            source_db_name=self.source_db,
+            source_table_name=self.source_table if self.account_table_name is None else self.account_table_name)
 
         if not StringUtil.is_blank(self.filter_sql):
             # 如果有过滤条件,加入过滤条件
@@ -2420,7 +2633,7 @@ class AllArchive(ArchiveData):
                "  {TEMP_DB}.{APP_TABLE} {PARTITION} \n"
                "  SELECT '{DATA_DATE}', ".
                format(SOURCE_DB=self.source_db,
-                      SOURCE_TABLE=self.source_table,
+                      SOURCE_TABLE=self.source_table if self.account_table_name is None else self.account_table_name,
                       TEMP_DB=self.temp_db,
                       APP_TABLE=self.app_table_name1,
                       PARTITION=self.create_partition_sql(self.data_range, "0",
@@ -2431,13 +2644,9 @@ class AllArchive(ArchiveData):
             hql = hql + "'{org}',".format(org=self.org)
         hql = hql + self.build_load_column_sql(None, True)
 
-        # 账号转移
-        if len(self.account_list) > 0:
-            hql = hql + self.case_when_acct_no()[:-1]
-        hql = hql + " FROM {source_db_name}.{source_table_name} S \n ".format(source_db_name=self.source_db,
-                                                                              source_table_name=self.source_table)
-        if len(self.account_list) > 0:
-            hql = hql + self.left_join_acct_no()
+        hql = hql + " FROM {source_db_name}.{source_table_name} S \n ".format(
+            source_db_name=self.source_db,
+            source_table_name=self.source_table if self.account_table_name is None else self.account_table_name)
 
         if not StringUtil.is_blank(self.filter_sql):
             # 如果有过滤条件,加入过滤条件
@@ -2468,7 +2677,7 @@ class AllArchive(ArchiveData):
             hql = hql + ("{COLS} FROM {DB_NAME}.{TABLE_NAME} \n"
                          "  WHERE {WHERE_SQL} \n"
                          "  UNION ALL \n".
-                         format(COLS=self.build_load_column_sql2(None, False),
+                         format(COLS=self.build_load_column_sql(None, False),
                                 DB_NAME=self.db_name,
                                 TABLE_NAME=self.table_name,
                                 WHERE_SQL=self.create_where_sql("",
@@ -2485,7 +2694,7 @@ class AllArchive(ArchiveData):
         # if self.org_pos == OrgPos.COLUMN.value:
         #     hql = hql + "{0},".format(self.col_org)
         hql = hql + ("  {COLS} FROM {TEMP_DB}.{APP_TABLE} \n".
-                     format(COLS=self.build_load_column_sql2(None, False),
+                     format(COLS=self.build_load_column_sql(None, False),
                             TEMP_DB=self.temp_db,
                             APP_TABLE=self.app_table_name1))
         # 往日增量
@@ -2562,7 +2771,7 @@ class AllArchive(ArchiveData):
         if self.org_pos == OrgPos.COLUMN.value:
             hql = hql + " '{org}', ".format(org=self.org)
 
-        hql = hql + self.build_load_column_sql2(None, False) \
+        hql = hql + self.build_load_column_sql(None, False) \
               + "\n  WHERE hds_section_rn=1"
         LOG.info("执行SQL:{0} ".format(hql))
         self.hive_util.execute(hql)
@@ -2759,6 +2968,18 @@ class ChainTransArchive(ArchiveData):
 
     def load_data(self):
         LOG.debug("source_data_mode:{0}".format(self.source_data_mode))
+
+        # 判断是否需要创建临时表
+        if len(self.account_list) > 0:
+            self.create_temp_table_for_account()  # 建表，导数据
+            # 更新source_ddl
+            self.source_ddl = (self.meta_data_service.
+                               parse_input_table(self.hive_util,
+                                                 self.source_db,
+                                                 self.account_table_name,
+                                                 self.filter_cols,
+                                                 True
+                                                 ))
         if self.source_data_mode == SourceDataMode.ALL.value:
             LOG.info("---全量拉链---")
             self.load_data_trans_all()
@@ -2877,7 +3098,7 @@ class ChainTransArchive(ArchiveData):
                         chain_edate=self.__chain_edate,
                         chain_open_date=self.CHAIN_OPEN_DATE,
                         source_db=self.source_db,
-                        source_table=self.source_table
+                        source_table=self.source_table if self.account_table_name is None else self.account_table_name
                         ))
         hql = hql + self.build_load_column_sql("A", False) + " \n FROM " + hql1
 
@@ -2904,7 +3125,7 @@ class ChainTransArchive(ArchiveData):
                  "  WHERE  CONCAT_WS('|',{col1}) != CONCAT_WS('|',{col2}) "
                .format(
                     source_db=self.source_db,
-                    source_table_name=self.source_table,
+                    source_table_name=self.source_table if self.account_table_name is None else self.account_table_name,
                     db_name=self.db_name,
                     table_name=self.table_name,
                     where_sql=self.create_where_sql(None,
@@ -3054,7 +3275,7 @@ class ChainTransArchive(ArchiveData):
                                                       self.org_pos,
                                                       self.org, None),
                       source_db=self.source_db,
-                      source_table=self.source_table,
+                      source_table=self.source_table if self.account_table_name is None else self.account_table_name,
                       pk_sql=self.build_key_sql_on("A", "B", self.pk_list),
                       chain_open_date=self.CHAIN_OPEN_DATE
                       ))
@@ -3076,14 +3297,15 @@ class ChainTransArchive(ArchiveData):
             hql = hql + "'{0}', ".format(self.org)
         hql = hql + self.build_load_column_sql(None, False)
 
-        if len(self.account_list) > 0:
-            hql = str(hql + self.case_when_acct_no())[:-1]
+        # if len(self.account_list) > 0:
+        #     hql = str(hql + self.case_when_acct_no())[:-1]
 
-        hql = hql + " FROM {source_db_name}.{source_table_name} S \n ".format(source_db_name=self.source_db,
-                                                                              source_table_name=self.source_table)
+        hql = hql + " FROM {source_db_name}.{source_table_name} S \n ".format(
+            source_db_name=self.source_db,
+            source_table_name=self.source_table if self.account_table_name is None else self.account_table_name)
 
-        if len(self.account_list) > 0:
-            hql = hql + self.left_join_acct_no()
+        # if len(self.account_list) > 0:
+        #     hql = hql + self.left_join_acct_no()
 
         if not StringUtil.is_blank(self.filter_sql):
             # 如果有过滤条件,加入过滤条件
@@ -3214,3 +3436,10 @@ class ChainTransArchive(ArchiveData):
                     v = True
                     break
         return v
+
+
+if __name__ == '__main__':
+    a = ChainTransArchive()
+    a.create_temp_table_for_account()
+    hql = a.build_load_column_sql(None, False)
+    LOG.info(" BUILD 出的SQL 是{0}".format(hql))

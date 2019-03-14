@@ -54,6 +54,15 @@ class DidpAccount():
 #     SCHEMA_NAME = Column()
 #
 
+class DidpAcctPtyWarnLog(Base):
+    __tablename__ = 'DIDP_ACCT_PTY_WARN_LOG'
+    BANK_ID = Column()
+    BATCH_DT = Column()
+    SCHEMA_NAME = Column()
+    TABLE_NAME = Column()
+    COLUMN_NAME = Column()
+    ERR_NUM = Column()
+
 class DidpHdsStructMetaCtrl(Base):
     """
         DIDP_HDS_STRUCT_META_CTRL

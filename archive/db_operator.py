@@ -20,29 +20,20 @@ class AccountCtrlDao(object):
     def __init__(self, session):
         self.SESSION = session
 
-    # def get_account_cols(self, sch_key, table_name):
-    #     """
-    #         获取账号字段列表
-    #     :return:
-    #     """
-    #     result = self.SESSION.query(DidpAccountCtrl).filter(
-    #         DidpAccountCtrl.SCHEMA_KEY == sch_key,
-    #         DidpAccountCtrl.TABLE_NAME == table_name
-    #     ).all()
-    #
-    #     return result
-
-
-# class DidpSchemaDao(object):
-#
-#     def __init__(self, session):
-#         self.SESSION = session
-#
-#     def get_schema_key(self, sch_id):
-#         result = self.SESSION.query(DidpSchemaInfo).\
-#             filter(DidpSchemaInfo.SCHEMA_ID == sch_id).one()
-#         return result
-
+    def register_log(self, bank_id, batch_dt, schema_name, table_name, column_name, err_num):
+        """
+            登记错误执行日志
+        :param bank_id:
+        :param batch_dt:
+        :param schema_name:
+        :param table_name:
+        :param column_name:
+        :param err_num:
+        :return:
+        """
+        new_log = DidpAcctPtyWarnLog(bank_id, batch_dt, schema_name, table_name, column_name, err_num)
+        self.SESSION.add(new_log)
+        self.SESSION.commit()
 
 class CommonParamsDao(object):
     """
