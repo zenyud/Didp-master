@@ -20,20 +20,6 @@ class AccountCtrlDao(object):
     def __init__(self, session):
         self.SESSION = session
 
-    def register_log(self, bank_id, batch_dt, schema_name, table_name, column_name, err_num):
-        """
-            登记错误执行日志
-        :param bank_id:
-        :param batch_dt:
-        :param schema_name:
-        :param table_name:
-        :param column_name:
-        :param err_num:
-        :return:
-        """
-        new_log = DidpAcctPtyWarnLog(bank_id, batch_dt, schema_name, table_name, column_name, err_num)
-        self.SESSION.add(new_log)
-        self.SESSION.commit()
 
 class CommonParamsDao(object):
     """
@@ -64,7 +50,6 @@ class CommonParamsDao(object):
         common_dict = {}
         for r in result:
             common_dict[r.PARAM_NAME] = r.PARAM_VALUE
-
         return common_dict
 
 

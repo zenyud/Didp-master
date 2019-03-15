@@ -27,7 +27,7 @@ DIDP_CFG_DB_JDBC_CLASS = os.environ["DIDP_CFG_DB_JDBC_CLASS"]
 DIDP_CFG_DB_JDBC_URL = os.environ["DIDP_CFG_DB_JDBC_URL"]
 
 
-class LogRecorder(object):
+class AccPtyWarnLogger(object):
     """ 记录账号关联执行日志
 
     Attributes:

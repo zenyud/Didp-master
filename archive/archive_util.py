@@ -18,7 +18,7 @@ from uuid import uuid1
 import datetime
 from archive.archive_enum import PartitionKey, AddColumn
 from archive.hive_field_info import HiveFieldInfo
-from utils.didp_db_operator import DbOperator
+from archive.didp_db_operator import DbOperator
 from utils.didp_logger import Logger
 from utils.didp_tools import get_db_login_info
 
@@ -393,10 +393,10 @@ class HiveUtil(object):
                 continue
             if x[0].upper().strip() in partition_cols:
                 continue
-            if x[0].upper().strip() in delete_cols:
+            if x[0].upper().strip() in delete_cols and filter:
                 continue
             if x[0].__contains__("#") or StringUtil.is_blank(x[0]):
-                continue
+                break
             hive_mate_info = HiveFieldInfo(x[0].upper(),
                                            x[1], x[2], x[3], x[4], x[5].strip(),
                                            i)

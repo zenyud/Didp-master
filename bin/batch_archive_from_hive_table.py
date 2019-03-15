@@ -28,8 +28,11 @@ from utils.didp_logger import Logger
 
 LOG = Logger()
 
-# ACCOUNT_MAP_TABLE = "HISCBUSDB.ARC_ACC_PTY"  # 账号引射表
-ACCOUNT_MAP_TABLE = "test.ARC_ACC_PTY"  # 账号引射表
+ACCOUNT_MAP_TABLE = "HDSCBUSDB.ARC_ACC_PTY"  # 账号引射表
+# ACCOUNT_MAP_TABLE = "test.ARC_ACC_PTY"  # 账号引射表
+ACCOUNT_PRE_STR = "account.pre.str"  # 主键类账号前缀
+
+
 class BatchArchiveInit(object):
     """
         批量初始化
@@ -332,6 +335,7 @@ class BatchArchiveInit(object):
                                                 self.project_id,
                                                 self.hive_util
                                                 )
+
     def create_table(self):
         """
             创建归档表
@@ -400,6 +404,8 @@ class BatchArchiveInit(object):
                     col_name = account_field.col_name
                     LOG.debug(col_name)
                     field_type = self.hive_util.get_column_desc(self.db_name, self.table_name, col_name)[0][1]
+                    if field_type.__contains__("ORACLE"):
+                        field_type = field_type.replace(",ORACLE", "")
                     hql = "ALTER TABLE {db_name}.{table_name} CHANGE {col_name} {col_name2} {col_type}".format(
                         db_name=self.db_name,
                         table_name=self.table_name,
@@ -515,7 +521,7 @@ class BatchArchiveInit(object):
             account_value = ""
             if col.col_type == 1:
                 # 主键
-                account_value = "concat('###', S.{0})".format(col.col_name)
+                account_value = "concat('{0}', S.{1})".format(self.common_dict.get(ACCOUNT_PRE_STR), col.col_name)
             elif col.col_type == 2:
                 account_value = "S." + col.col_name
             table_alias = "T" + str(i)
@@ -554,13 +560,13 @@ class BatchArchiveInit(object):
               "    from_unixtime(unix_timestamp(`{date_col}`,'{date_col_format}')," \
               "'yyyyMMdd') AS {col_date}, " \
             .format(
-                    db_name=self.db_name,
-                    table_name=self.table_name,
-                    partition=self.create_partiton_sql(),
-                    date_col=self.date_col,
-                    date_col_format=self.date_format,
-                    col_date=self.col_date
-                    )
+            db_name=self.db_name,
+            table_name=self.table_name,
+            partition=self.create_partiton_sql(),
+            date_col=self.date_col,
+            date_col_format=self.date_format,
+            col_date=self.col_date
+        )
         if self.org_pos == OrgPos.COLUMN.value:
             hql = hql + " '{org}',".format(org=self.org)
         hql = hql + self.build_load_column_sql("", False)
