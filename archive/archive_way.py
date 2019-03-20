@@ -220,12 +220,9 @@ class ArchiveData(object):
         """
         if len(self.account_list) > 0:
             # 存在账号转移
-            self.account_table_name = self.source_table + "_account_tmp"
+            self.account_table_name = self.table_name + "_account_tmp" + str(self.save_mode)
             account_name_list = [acc.col_name.upper() for acc in self.account_list]
-            is_exist_table = self.hive_util.exist_table(self.source_db, self.account_table_name)
-            if is_exist_table:
-                self.hive_util.execute("drop table {0}.{1}".format(self.source_db, self.account_table_name))
-
+            self.drop_table(self.source_db, self.account_table_name)
             hql = "CREATE TABLE IF NOT EXISTS {db_name}.{table_name} ( \n". \
                 format(db_name=self.source_db,
                        table_name=self.account_table_name
@@ -251,6 +248,8 @@ class ArchiveData(object):
                 col_type = self.hive_util.get_column_desc(self.source_db, self.source_table, acc)[0][1]
                 if col_type.__contains__("ORACLE"):
                     col_type = col_type.replace(",ORACLE", "")
+                if StringUtil.eq_ignore(col_type[:4], "CHAR"):
+                    col_type = "VAR" + col_type
                 sql = sql + "{col_name} {col_type} ,".format(col_name=acc, col_type=col_type)
             hql = hql + sql[:-1] + " )"
             LOG.info("执行SQL：%s" % hql)
@@ -467,11 +466,21 @@ class ArchiveData(object):
         for col in self.account_list:
             if i == 0:
                 hql = hql[:-1]  # 删除末尾的逗号
+            # 判断是否需要trim
+            need_trim = False
+            col_type = self.hive_util.get_column_desc(self.source_db, self.account_table_name, col.col_name)[0][1]
+            LOG.debug("col_type %s" % col_type)
+            if col_type.__contains__("ORACLE"):
+                col_type = col_type.replace(",ORACLE", "")
+            if col_type.upper().split('(')[0] in ["STRING", "VARCHAR", "CHAR"]:
+                need_trim = True
             table_alias = "T" + str(i)
             hql = hql + " LEFT JOIN {TABLE_NAME} AS {T} " \
-                        "ON  {T}.ACC_NO = S.{col_name} ".format(T=table_alias,
-                                                                TABLE_NAME=ACCOUNT_MAP_TABLE,
-                                                                col_name=col.col_name)
+                        "ON  {T}.ACC_NO = {col_name} ".format(T=table_alias,
+                                                              TABLE_NAME=ACCOUNT_MAP_TABLE,
+                                                              col_name="S." + col.col_name if not need_trim else
+                                                              "trim(S." + col.col_name + ")"
+                                                              )
             i = i + 1
         return hql
 
@@ -551,8 +560,6 @@ class ArchiveData(object):
         # 获取表的评论
         table_comment = self.hive_util.get_table_comment(self.source_db,
                                                          self.source_table)
-        # 先格式化dataDate
-
         self.meta_data_service.upload_meta_data(self.schema_id,
                                                 self.db_name,
                                                 self.source_ddl,
@@ -562,7 +569,10 @@ class ArchiveData(object):
                                                 self.common_dict,
                                                 table_comment,
                                                 self.project_id,
-                                                self.hive_util)
+                                                self.hive_util,
+                                                self.cluster_col,
+                                                self.account_list,
+                                                self.__args.pkList)
 
     @abc.abstractmethod
     def create_table(self, db_name, table_name):
@@ -618,6 +628,7 @@ class ArchiveData(object):
 
         alter_sql2 = ""
         if self.field_type_change_list:
+            LOG.debug("有字段精度的变化 ！！！！")
             # 有字段类型改变
             for field in self.field_type_change_list:
                 alter_sql2 = alter_sql2 + ("alter table {db_name}.{table_name} "
@@ -632,7 +643,7 @@ class ArchiveData(object):
                     alter_sql2 = alter_sql2 + (" comment '{comment}' ".
                         format(
                         comment=field.comment_ddl))
-                LOG.debug("修改表sql为：%s" % alter_sql2)
+                LOG.info("修改表sql为：%s" % alter_sql2)
                 self.hive_util.execute(alter_sql2)
 
     def get_fields_rank_list(self, db_name, table_name, data_date):
@@ -651,10 +662,24 @@ class ArchiveData(object):
                                                               db_name,
                                                               table_name,
                                                               True)
-
+        #  重构hive_field_infos
+        acc_names = []
+        if len(self.account_list) > 0:
+            acc_names = [acc.col_name.upper() for acc in self.account_list]
+        i = 0
+        new_hive_field_infos = list()
+        for field in hive_field_infos:
+            if field.col_name.upper() in acc_names:
+                continue
+            elif field.col_name.__contains__("_ori"):
+                field.col_name = field.col_name[:-4]
+            # 重构序号
+            field.col_seq = i
+            new_hive_field_infos.append(field)
+            i = i + 1
         # 字段名更改列表
         self.field_change_list = self.get_change_list(meta_field_infos,
-                                                      hive_field_infos)
+                                                      new_hive_field_infos)
 
         LOG.debug("------字段变更列表------ {0}".format(self.field_change_list))
         # 检查 字段类型是否改变
@@ -767,15 +792,15 @@ class ArchiveData(object):
                     continue
                 if not meta_type_ddl.__eq__(meta_type_hive):
                     # 字段类型不同,判断有哪些不同
-                    LOG.debug("meta_type_ddl %s " % meta_type_ddl)
-                    LOG.debug("meta_type_hive %s " % meta_type_hive)
+                    LOG.debug("meta_type_ddl %s " % meta_type_ddl.get_whole_type)
+                    LOG.debug("meta_type_hive %s " % meta_type_hive.get_whole_type)
                     if StringUtil.eq_ignore(meta_type_ddl.field_type,
                                             meta_type_hive.field_type):
                         # 类型相同判断精度,允许decimal字段精度扩大
 
                         if (meta_type_hive.field_length <
                                 meta_type_ddl.field_length and
-                                meta_type_hive.field_scale <
+                                meta_type_hive.field_scale <=
                                 meta_type_ddl.field_scale):
                             LOG.debug(
                                 "字段{col_name}精度扩大 {hive_type} -->> {ddl_type} \n"
@@ -818,11 +843,9 @@ class ArchiveData(object):
                         else:
                             LOG.debug("字段{col_name} 精度缩小 "
                                       "{hive_type}-->> {ddl_type}\n"
-                                      "不修改归档表字段精度 ！".
-                                format(
-                                col_name=field.col_name,
-                                hive_type=meta_type_hive.get_whole_type,
-                                ddl_type=meta_type_ddl.get_whole_type))
+                                      "不修改归档表字段精度 ！".format(col_name=field.col_name,
+                                                            hive_type=meta_type_hive.get_whole_type,
+                                                            ddl_type=meta_type_ddl.get_whole_type))
                     else:
                         # 不允许字段类型发生改变
                         is_error = True
@@ -1031,7 +1054,7 @@ class ArchiveData(object):
             self.field_change_list = self.get_change_list(self.source_ddl,
                                                           hive_field_infos)
             account_name_list = [acc.col_name.upper() for acc in self.account_list]
-        LOG.debug("ACCOUNT_NAME_LIST的长度是 {0}".format(len(account_name_list)))
+
         if self.field_change_list:
             # 如果字段有变化
             LOG.debug("有字段的变化~ ")
@@ -1089,13 +1112,14 @@ class ArchiveData(object):
             DELETE_FLG=self._DELETE_FLG,
             DELETE_DT=self._DELETE_DT
         )
+        #  账号转移字段统一加在最后
         if len(self.account_list) > 0:
             sql = sql + ","
 
             for acc in account_name_list:
                 if not StringUtil.is_blank(table_alias):
-                    acc = table_alias + "." + acc
-                sql = sql + acc + ","
+                    acc = " TRIM(" + table_alias + "." + acc + ")"
+                sql = sql + " TRIM(" + acc + ")" + ","
             sql = sql[:-1]
         LOG.debug("build_column %s" % sql)
         return sql
@@ -1156,8 +1180,8 @@ class ArchiveData(object):
             # 在SQL的末端加上账号字段
             for acc in account_name_list:
                 if not StringUtil.is_blank(table_alias):
-                    acc = table_alias + "." + acc
-                sql = sql + acc + ","
+                    acc = " TRIM(" + table_alias + "." + acc + ")"
+                sql = sql + "TRIM(" + acc + ")" + ","
         return sql[:-1]
 
     @staticmethod
@@ -1342,8 +1366,8 @@ class ArchiveData(object):
             self.meta_unlock()
             LOG.info("源数据的数据量统计")
             sql = ("SELECT COUNT(1) FROM {db_name}.{table_name}   ".
-                   format(db_name=self.__args.sDb,
-                          table_name=self.__args.sTable,
+                   format(db_name=self.source_db,
+                          table_name=self.source_table,
                           ))
             if self.filter_sql:
                 sql = sql + " where {0}".format(self.filter_sql)
@@ -1413,7 +1437,7 @@ class ArchiveData(object):
                                                         self.org_pos,
                                                         self.org,
                                                         None),
-                        date_col=self.col_date,
+                        date_col=self.col_date if int(self.save_mode) != 4 else "hds_sdate",
                         date=self.data_date
                     )
                     LOG.info("执行SQL %s" % hql)
@@ -1431,6 +1455,9 @@ class ArchiveData(object):
     def clean(self):
         if self.is_drop_tmp_table:
             self.drop_table(self.temp_db, self.app_table_name1)
+
+        if self.account_table_name:
+            self.drop_table(self.source_db, self.account_table_name)  # 删除临时表
 
     def reload_data(self):
         # 需要动态分区
@@ -1452,17 +1479,21 @@ class ArchiveData(object):
             cols = ""
             field_change_list = self.get_change_list(old_fields,
                                                      tmp_fields)
-            for field in field_change_list:
-                if (field.col_name.upper() in old_col_names and
-                        field.col_name.upper() in tmp_col_names):
-                    cols = cols + self.build_column(None, field.col_name,
-                                                    field.hive_type.field_type,
-                                                    False) + ","
+            if field_change_list:
+                for field in field_change_list:
+                    if (field.col_name.upper() in old_col_names and
+                            field.col_name.upper() in tmp_col_names):
+                        cols = cols + self.build_column(None, field.col_name,
+                                                        field.hive_type.field_type,
+                                                        False) + ","
 
-                elif (field.col_name.upper() in tmp_col_names and
-                      field.col_name.upper() not in old_col_names):
-                    cols = cols + " '' as {0} ,".format(
-                        field.col_name.upper())  # 加上空串
+                    elif (field.col_name.upper() in tmp_col_names and
+                          field.col_name.upper() not in old_col_names):
+                        cols = cols + " '' as {0} ,".format(
+                            field.col_name.upper())  # 加上空串
+            else:
+                for field in old_fields:
+                    cols = cols + self.build_column(None, field.col_name, field.data_type, False) + ","
 
             hql = "INSERT INTO TABLE {DB_NAME}.{TABLE_NAME}_NEW PARTITION ({PARTITION_COLS})  " \
                   " SELECT {COLS} FROM {DB_NAME}.{TABLE_NAME} ".format(
@@ -2819,6 +2850,7 @@ class ChainTransArchive(ArchiveData):
                                  save_mode=self.save_mode
                                  ))
         #  分区值和封链判断
+        # 如果跑批日期和为当前分区的最后一天，则需要进行封链操作
         if StringUtil.eq_ignore(DatePartitionRange.MONTH.value,
                                 self.data_range):
             if self.end_date.__eq__(self.data_date):

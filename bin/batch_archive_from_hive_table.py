@@ -333,8 +333,10 @@ class BatchArchiveInit(object):
                                                 self.common_dict,
                                                 source_table_comment,
                                                 self.project_id,
-                                                self.hive_util
-                                                )
+                                                self.hive_util,
+                                                self.cluster_col,
+                                                self.account_list,
+                                                None)
 
     def create_table(self):
         """
@@ -406,6 +408,8 @@ class BatchArchiveInit(object):
                     field_type = self.hive_util.get_column_desc(self.db_name, self.table_name, col_name)[0][1]
                     if field_type.__contains__("ORACLE"):
                         field_type = field_type.replace(",ORACLE", "")
+                    if StringUtil.eq_ignore(field_type[:4], "CHAR"):
+                        field_type = "VAR" + field_type
                     hql = "ALTER TABLE {db_name}.{table_name} CHANGE {col_name} {col_name2} {col_type}".format(
                         db_name=self.db_name,
                         table_name=self.table_name,
@@ -521,12 +525,12 @@ class BatchArchiveInit(object):
             account_value = ""
             if col.col_type == 1:
                 # 主键
-                account_value = "concat('{0}', S.{1})".format(self.common_dict.get(ACCOUNT_PRE_STR), col.col_name)
+                account_value = "concat('{0}', trim(S.{1}))".format(self.common_dict.get(ACCOUNT_PRE_STR), col.col_name)
             elif col.col_type == 2:
                 account_value = "S." + col.col_name
             table_alias = "T" + str(i)
             hql = hql + " CASE WHEN  {T}.ACC_PTY is not null then {T}.ACC_PTY " \
-                        " ELSE {account_value} END {col_name} ,".format(
+                        " ELSE trim({account_value}) END {col_name} ,".format(
                 T=table_alias,
                 account_value=account_value,
                 col_name=col.col_name
@@ -542,7 +546,7 @@ class BatchArchiveInit(object):
                 hql = hql[:-1]  # 删除末尾的逗号
             table_alias = "T" + str(i)
             hql = hql + " LEFT JOIN {TABLE_NAME} AS {T} " \
-                        "ON  {T}.ACC_NO = S.{col_name} ".format(T=table_alias,
+                        "ON  {T}.ACC_NO = TRIM(S.{col_name}) ".format(T=table_alias,
                                                                 TABLE_NAME=ACCOUNT_MAP_TABLE,
                                                                 col_name=col.col_name)
             i = i + 1
@@ -569,7 +573,7 @@ class BatchArchiveInit(object):
         )
         if self.org_pos == OrgPos.COLUMN.value:
             hql = hql + " '{org}',".format(org=self.org)
-        hql = hql + self.build_load_column_sql("", False)
+        hql = hql + self.build_load_column_sql("", True)
 
         if len(self.account_list) > 0:
             hql = hql + self.case_when_acct_no()
