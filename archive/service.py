@@ -553,7 +553,7 @@ class MetaDataService(object):
         :return:
         """
         acc_names = None
-        if len(acc_list)>0:
+        if len(acc_list) > 0:
             acc_names = [acc.col_name.lower() for acc in acc_list]
         # 补录元数据
         if not self.contain_add_cols:
@@ -703,7 +703,6 @@ class MetaDataService(object):
 
             else:
                 for field in source_field_info:
-
                     ddl_type = MetaTypeInfo(field.data_type, field.col_length,
                                             field.col_scale)
                     col_name = field.col_name
@@ -729,7 +728,7 @@ class MetaDataService(object):
                                                {
                                                    "COL_TYPE": ddl_type.field_type,
                                                    "COL_LENGTH": ddl_type.field_length,
-                                                   "COL_SCALE": ddl_type.filed_scale
+                                                   "COL_SCALE": ddl_type.field_scale
                                                }
                                                )
 
@@ -741,7 +740,7 @@ class MetaDataService(object):
         """
         meta_info_list = list()
         acc_names = None
-        if len(acc_list)>0 :
+        if len(acc_list) > 0:
             acc_names = [acc.col_name.upper() for acc in acc_list]
         fiter_cols = ["DELETE_FLG", "DELETE_DT"]
         for add_col in AddColumn:

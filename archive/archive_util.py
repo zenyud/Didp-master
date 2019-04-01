@@ -471,5 +471,4 @@ class HiveUtil(object):
 
 if __name__ == '__main__':
     hive_util = HiveUtil("d5852c01c3fd44c6b8ad0bcab9ea0de5")
-
-    print hive_util.exist_table("orc_test", "mysql_test_table006_init_init")
+    A= hive_util.exist_table("orc_test", "mysql_test_table006_init_init")

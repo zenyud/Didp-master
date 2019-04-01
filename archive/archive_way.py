@@ -14,6 +14,7 @@ import traceback
 reload(sys)
 sys.setdefaultencoding('utf8')
 sys.path.append("{0}".format(os.environ["DIDP_HOME"]))
+
 from abc import ABCMeta
 from utils.didp_accpty_warn_logger import AccPtyWarnLogger
 from sqlalchemy import create_engine
@@ -22,7 +23,7 @@ from archive.archive_enum import *
 from archive.hive_field_info import *
 from archive.service import *
 from utils.didp_logger import Logger
-
+from utils.didp_decoder import decode_password
 LOG = Logger()
 
 USER = os.environ["DIDP_CFG_DB_USER"]
@@ -47,15 +48,15 @@ class ArchiveData(object):
 
     __lock_archive = False  # 归档锁
     __lock_meta = False  # 元数据锁
-    date_scope = ""  # 数据日期范围
+    date_scope = ""  # 数据日期范围<分区范围>
     start_date = ""  # 开始日期
     end_date = ""  # 结束日期
     field_change_list = None  # 变更字段列表
     field_type_change_list = None  # 变更字段类型列表
     source_count = 0  # 原始表数据量
     archive_count = 0  # 归档数据条数
-    pro_start_date = None  # 流程开始时间
-    pro_end_date = None  # 流程结束时间
+    __pro_start_date = None  # 流程开始时间
+    __pro_end_date = None  # 流程结束时间
     __PRO_STATUS = "0"  # 加工状态 0 成功，1失败
     error_msg = ""  # 错误信息
     is_already_load = False  # 是否已经归档完成
@@ -91,7 +92,7 @@ class ArchiveData(object):
 
         self.db_name = self.__args.db  # 目标库
         self.table_name = self.__args.table  # 目标表
-        self.account_ctl = AccountCtrlDao(self.session)  # 操作日志类
+
         # 日期字段名
         self.col_date = self.common_dict.get(AddColumn.COL_DATE.value)
         # 机构字段名
@@ -153,7 +154,7 @@ class ArchiveData(object):
         # db_name = db_login_info['db_name']
 
         engine_str = ("mysql+mysqlconnector://{db_user}:{password}@{db_url}".
-                      format(db_user=USER, password=PASSWORD,
+                      format(db_user=USER, password=decode_password(PASSWORD),
                              db_url=db_url,
                              ))
         engine = create_engine(engine_str)
@@ -181,14 +182,12 @@ class ArchiveData(object):
             __app_name = self.table_name + "_hds_tmp"
         if self.org_pos != OrgPos.NONE.value:
             __app_name = __app_name + "_" + self.org
-
-        __app_name = (__app_name.replace("OBJ", self.obj).
-                      replace("TABLE", self.table_name) + '_1')
+        __app_name = __app_name + str(self.save_mode)
+        __app_name = __app_name.replace("TABLE", self.table_name) + '_1'
 
         return __app_name
 
     # 是否删除临时表
-
     @property
     def is_drop_tmp_table(self):
         is_drop_tmp = self.common_dict.get("drop.archive.temp.table")
@@ -626,11 +625,11 @@ class ArchiveData(object):
             self.need_reload = True
             self.create_table(self.db_name, self.table_name + "_NEW")
 
-        alter_sql2 = ""
         if self.field_type_change_list:
             LOG.debug("有字段精度的变化 ！！！！")
             # 有字段类型改变
             for field in self.field_type_change_list:
+                alter_sql2 = ""
                 alter_sql2 = alter_sql2 + ("alter table {db_name}.{table_name} "
                                            "change column `{column}` `{column}` {type} ".
                                            format(db_name=self.__args.db,
@@ -671,7 +670,7 @@ class ArchiveData(object):
         for field in hive_field_infos:
             if field.col_name.upper() in acc_names:
                 continue
-            elif field.col_name.__contains__("_ori"):
+            elif field.col_name.upper()[-4:].__eq__("_ORI"):
                 field.col_name = field.col_name[:-4]
             # 重构序号
             field.col_seq = i
@@ -681,7 +680,7 @@ class ArchiveData(object):
         self.field_change_list = self.get_change_list(meta_field_infos,
                                                       new_hive_field_infos)
 
-        LOG.debug("------字段变更列表------ {0}".format(self.field_change_list))
+        # LOG.debug("------字段变更列表------ {0}".format([field.col_name for field in self.field_change_list]))
         # 检查 字段类型是否改变
         self.field_type_change_list = self.check_column_modify(
             self.field_change_list)
@@ -794,6 +793,9 @@ class ArchiveData(object):
                     # 字段类型不同,判断有哪些不同
                     LOG.debug("meta_type_ddl %s " % meta_type_ddl.get_whole_type)
                     LOG.debug("meta_type_hive %s " % meta_type_hive.get_whole_type)
+                    LOG.debug(meta_type_ddl.field_type)
+                    if StringUtil.eq_ignore(meta_type_hive.field_type, "char"):
+                        meta_type_hive.field_type = "varchar"
                     if StringUtil.eq_ignore(meta_type_ddl.field_type,
                                             meta_type_hive.field_type):
                         # 类型相同判断精度,允许decimal字段精度扩大
@@ -1261,8 +1263,8 @@ class ArchiveData(object):
                                          TABLE_NAME=self.table_name,
                                          DATA_OBJECT_NAME=self.obj,
                                          PROCESS_TYPE=PROCESS_TYPE,  # 加工类型
-                                         PROCESS_STARTTIME=self.pro_start_date,
-                                         PROCESS_ENDTIME=self.pro_end_date,
+                                         PROCESS_STARTTIME=self.__pro_start_date,
+                                         PROCESS_ENDTIME=self.__pro_end_date,
                                          PROCESS_STATUS=self.__PRO_STATUS,
                                          INPUT_LINES=self.source_count,
                                          OUTPUT_LINES=self.archive_count,
@@ -1328,7 +1330,7 @@ class ArchiveData(object):
         """
         try:
             LOG.info("------归档作业开始执行------")
-            self.pro_start_date = DateUtil.get_now_date_standy()  # 获取流程执行时间
+            self.__pro_start_date = DateUtil.get_now_date_standy()  # 获取流程执行时间
             LOG.info(" 判断是否有在进行的任务,并加锁 ")
             self.lock()
 
@@ -1402,7 +1404,7 @@ class ArchiveData(object):
             if self.__lock_meta:
                 self.meta_unlock()
             LOG.info("登记执行日志")
-            self.pro_end_date = DateUtil.get_now_date_standy()
+            self.__pro_end_date = DateUtil.get_now_date_standy()
             self.register_run_log()
 
             # 如果有账号关联 则记录
@@ -1460,15 +1462,21 @@ class ArchiveData(object):
             self.drop_table(self.source_db, self.account_table_name)  # 删除临时表
 
     def reload_data(self):
+        """
+            如果新增了字段，由于表中带有冗余字段delete_dt和delete_flg，
+            需要重建目标表，并将数据导入到目标表当中
+        :return:
+        """
         # 需要动态分区
         if self.need_reload:
             partition_cols = ""
             cols = ""
             if not StringUtil.eq_ignore(self.data_range,
                                         DatePartitionRange.ALL_IN_ONE.value):
-                partition_cols = self.partition_data_scope
+                partition_cols = self.partition_data_scope+","
             if self.org_pos == OrgPos.PARTITION.value:
-                partition_cols = partition_cols + "," + self.partition_org
+                partition_cols = partition_cols + self.partition_org + ","
+            partition_cols=partition_cols[:-1] # 去掉行尾的逗号
             old_fields = self.hive_util.get_hive_meta_field(self.common_dict, self.db_name, self.table_name,
                                                             False)
             tmp_fields = self.hive_util.get_hive_meta_field(self.common_dict, self.db_name, self.table_name + "_new",
@@ -1702,8 +1710,7 @@ class LastAllArchive(ArchiveData):
         if not StringUtil.eq_ignore(self.data_range,
                                     DatePartitionRange.ALL_IN_ONE.value):
             raise BizException(
-                "当日全量归档模式，不允许时间分区;当前时间分区为：{0}".
-                    format(self.data_range))
+                "当日全量归档模式，不允许时间分区;当前时间分区为：{0}".format(self.data_range))
 
     def count_archive_data(self):
         hql = "select count(1) from {db_name}.{table_name} ".format(
@@ -1715,7 +1722,6 @@ class LastAllArchive(ArchiveData):
             LOG.info("----增量 -》 最近一天全量----- \n"
                      "增量数据源数据条数：{0} \n"
                      "增量求全量入库数据条数：{1}".format(self.source_count, count))
-
         else:
             LOG.info("全量 -》 全量 的入库数据为：{0}".format(count))
         return count
