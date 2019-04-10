@@ -231,7 +231,7 @@ class MetaDataService(object):
         # 拆分主键
         pk_list = None
         if pk_str:
-            pk_list = pk_str.split("|")
+            pk_list = [pk.lower() for pk in pk_str.split("|")]
         if meta_table_info:
             # 判断表结构是否发生变化，如果未发生变化 则进行元数据登记
 
@@ -822,12 +822,14 @@ class MetaDataService(object):
             for pk in pk_list:
                 col_pk = self.meta_column_info_dao.get_column(t_id, pk)
                 if len(col_pk) != 0:
-                    is_pk_flag = col_pk[0].PK_FLAG
-                    if not is_pk_flag:
+                    pk_value  = col_pk[0].PK_FLAG
+                    if not pk_value or pk_value == 0 :
                         LOG.info("补录主键 %s" % pk)
                         self.meta_column_info_dao.update_meta_column(t_id, pk, {
                             "PK_FLAG": 1
                         })
+
+
 
 
 class MonRunLogService(object):

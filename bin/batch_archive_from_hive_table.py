@@ -12,6 +12,8 @@ import time
 
 import traceback
 
+
+
 reload(sys)
 sys.setdefaultencoding('utf8')
 sys.path.append("{0}".format(os.environ["DIDP_HOME"]))
@@ -25,7 +27,7 @@ from archive.archive_util import HiveUtil, BizException, DateUtil, StringUtil
 from archive.model import DidpMonRunLog, DidpMonRunLogHis, DidpAccount
 from archive.service import MetaDataService, MonRunLogService
 from utils.didp_logger import Logger
-
+from utils.didp_decoder import decode_password
 LOG = Logger()
 
 ACCOUNT_MAP_TABLE = "HDSCBUSDB.ARC_ACC_PTY"  # 账号引射表
@@ -129,7 +131,7 @@ class BatchArchiveInit(object):
         # db_name = db_login_info['db_name']
 
         engine_str = "mysql+mysqlconnector://{db_user}:{password}@{db_url}".format(
-            db_user=user, password=password,
+            db_user=user, password=decode_password(password),
             db_url=db_url,
         )
         engine = create_engine(engine_str)

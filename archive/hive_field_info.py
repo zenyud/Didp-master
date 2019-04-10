@@ -9,12 +9,20 @@
 
 class HiveFieldInfo(object):
     """
-        Hive 字段信息
+        Hive 字段
     """
 
     def __init__(self, col_name, data_type, default_value, not_null, unique,
                  comment, col_seq):
-
+        """
+        :param col_name:  字段名
+        :param data_type:  字段类型
+        :param default_value:  默认值
+        :param not_null: 是否为空
+        :param unique:
+        :param comment:  字段备注
+        :param col_seq:  字段序号
+        """
         self.full_type = data_type
         self.col_name = col_name
         if "(" not in data_type:

@@ -1291,8 +1291,7 @@ class ArchiveData(object):
         else:
             return False
 
-    @staticmethod
-    def build_key_sql_on(table_alias1, table_alias2, pk_list):
+    def build_key_sql_on(self, table_alias1, table_alias2, pk_list):
         """
             更加别名关联主键 例如a.key=b.key
         :param table_alias1:
@@ -1300,6 +1299,9 @@ class ArchiveData(object):
         :param pk_list:
         :return:
         """
+        # account_name_list = []
+        # if len(self.account_list) > 0:
+        #     account_name_list = [acc.col_name.upper() for acc in self.account_list]
         hql = ""
         table_alias1 = table_alias1 + "." if not StringUtil.is_blank(
             table_alias1) else ""
@@ -1308,6 +1310,8 @@ class ArchiveData(object):
         for pk in pk_list:
             if pk_list.index(pk) > 0:
                 hql = hql + " and "
+            # if pk.upper() in account_name_list:
+            #     pk = pk + "_ORI"  # 如果主键是账号转移字段 则需要用旧字段来关联
             hql = hql + table_alias1 + pk + "=" + table_alias2 + pk
         return hql
 
